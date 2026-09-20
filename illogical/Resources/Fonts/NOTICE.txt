@@ -1,0 +1,10 @@
+JetBrainsMonoNerdFont-Regular.ttf is copied without modification from Ghostty
+commit 27e8b3fa85d9cf8c7cd5ae2ced348bcb0a4fba9c, src/font/res.
+
+JetBrains Mono: Copyright 2020 The JetBrains Mono Project Authors
+(https://github.com/JetBrains/JetBrainsMono).
+Nerd Fonts patching and symbols: https://github.com/ryanoasis/nerd-fonts.
+Distributed under the SIL Open Font License 1.1, included in JetBrainsMono-OFL.txt.
+
+The font is loaded privately as a last-resort Nerd Fonts fallback. It is not
+installed into or substituted for the user's system font collection.
