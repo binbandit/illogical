@@ -1,0 +1,11 @@
+--- a/src/terminal/kitty/graphics_storage.zig
++++ b/src/terminal/kitty/graphics_storage.zig
+@@ -296,6 +296,8 @@
+         // Reserve map capacity before evicting anything so allocation failure
+         // cannot leave storage partially evicted. Existing keys need no room.
+         if (!self.images.contains(img.id)) {
++            // illogical: tiny unplaced images must also have a metadata budget.
++            if (self.images.count() >= 1024) return error.OutOfMemory;
+             try self.images.ensureUnusedCapacity(alloc, 1);
+         }
+ 

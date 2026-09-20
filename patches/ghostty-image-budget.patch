@@ -1,0 +1,11 @@
+--- a/src/terminal/kitty/graphics_image.zig
++++ b/src/terminal/kitty/graphics_image.zig
+@@ -19,7 +19,7 @@
+ const max_dimension = 10000;
+ 
+ /// Maximum size in bytes, taken from Kitty.
+-const max_size = 400 * 1024 * 1024; // 400MB
++const max_size = 8 * 1024 * 1024; // illogical: bound pending uploads and decoded images.
+ 
+ /// An image that is still being loaded. The image should be initialized
+ /// using init on the first chunk and then addData for each subsequent

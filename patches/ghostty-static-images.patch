@@ -1,0 +1,23 @@
+--- a/src/terminal/kitty/graphics_exec.zig
++++ b/src/terminal/kitty/graphics_exec.zig
+@@ -66,6 +66,20 @@
+         };
+     }
+ 
++    // illogical advertises static images only. Reject animation before it can
++    // retain hidden frame metadata, while respecting the protocol quiet mode.
++    switch (cmd.control) {
++        .transmit_animation_frame, .control_animation, .compose_animation => {
++            return if (quiet == .failures) null else .{
++                .id = identifiers.image_id,
++                .image_number = identifiers.image_number,
++                .placement_id = identifiers.placement_id,
++                .message = "ENOTSUP: image animation is not supported",
++            };
++        },
++        else => {},
++    }
++
+     const resp_: ?Response = switch (cmd.control) {
+         .query => query(io, alloc, terminal, cmd),
+         .display => display(io, alloc, terminal, cmd),

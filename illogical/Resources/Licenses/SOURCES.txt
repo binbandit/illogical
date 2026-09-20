@@ -1,0 +1,98 @@
+Original notice sources. SHA-256 is calculated over the retained bytes.
+
+Additional license files were extracted from these pinned upstream archives:
+uucode: https://codeload.github.com/jacobsandlund/uucode/tar.gz/9d55524551411b493cca41ca06363625d90aff1e
+Members: licenses/LICENSE_Bjoern_Hoehrmann and licenses/LICENSE_unicode
+simdutf: https://codeload.github.com/simdutf/simdutf/tar.gz/refs/tags/v9.0.0
+Members: LICENSE-MIT and LICENSE-APACHE
+simdutf-isadetection-NOTICE.txt is the original attribution comment from
+.build/dependencies/ghostty/pkg/simdutf/vendor/simdutf.h
+
+Ghostty-LICENSE.txt
+Source: .build/dependencies/ghostty/LICENSE
+SHA-256: 386211873e5b7a02f663ae4d7adf96285999f91608f8f9f31fecfd0f4095e6f1
+
+libghostty-go-LICENSE.txt
+Source: ${GOMODCACHE}/go.mitchellh.com/libghostty@v0.0.0-20260919033837-7c854ef33a99/LICENSE
+SHA-256: fdf9b4ad7b61687fd3d4b1e3efa63cbc10743e6b733a62669b53a324251357b9
+
+creack-pty-LICENSE.txt
+Source: ${GOMODCACHE}/github.com/creack/pty@v1.1.24/LICENSE
+SHA-256: a2a1cea59d9c2d71908082f516f86bb560abf857646ecf69d70c121ead14aef4
+
+quic-go-LICENSE.txt
+Source: ${GOMODCACHE}/github.com/quic-go/quic-go@v0.62.0/LICENSE
+SHA-256: 77d0b7b53e8abb84cf4dd3f9945a7fdf27044240d2e8023966a721a9a46fe96e
+
+Go-LICENSE.txt
+Source: ${HOMEBREW_GO}/LICENSE
+SHA-256: 911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad
+
+golang-x-crypto-LICENSE.txt
+Source: ${GOMODCACHE}/golang.org/x/crypto@v0.54.0/LICENSE
+SHA-256: 911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad
+
+golang-x-crypto-PATENTS.txt
+Source: ${GOMODCACHE}/golang.org/x/crypto@v0.54.0/PATENTS
+SHA-256: 96f408bfae65bf137fc2525d3ecb030271c50c1e90799f87abf8846d8dd505cc
+
+golang-x-net-LICENSE.txt
+Source: ${GOMODCACHE}/golang.org/x/net@v0.56.0/LICENSE
+SHA-256: 911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad
+
+golang-x-net-PATENTS.txt
+Source: ${GOMODCACHE}/golang.org/x/net@v0.56.0/PATENTS
+SHA-256: 96f408bfae65bf137fc2525d3ecb030271c50c1e90799f87abf8846d8dd505cc
+
+golang-x-sys-LICENSE.txt
+Source: ${GOMODCACHE}/golang.org/x/sys@v0.48.0/LICENSE
+SHA-256: 911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad
+
+golang-x-sys-PATENTS.txt
+Source: ${GOMODCACHE}/golang.org/x/sys@v0.48.0/PATENTS
+SHA-256: 96f408bfae65bf137fc2525d3ecb030271c50c1e90799f87abf8846d8dd505cc
+
+Zig-LICENSE.txt
+Source: .build/dependencies/zig-aarch64-macos-0.16.0/LICENSE
+SHA-256: 5c537d6853e005298a285d508cff9ac7192cea23576c840d485b2b586a7ff177
+
+uucode-LICENSE.md
+Source: .build/dependencies/ghostty/zig-pkg/uucode-0.2.0-ZZjBPuuFVgC8YZ8eld4fOKsZANLIhTFMzULQxhkLi1C7/LICENSE.md
+SHA-256: 312e901e142be2477b4ca859e9311f9e3f80d33372991759b7921c1893605f33
+
+uucode-Bjoern-Hoehrmann-LICENSE.txt
+Source: .build/licenses/extracted/uucode-Bjoern-Hoehrmann-LICENSE.txt
+SHA-256: de219cece932aad5a817bf763393d8d149d378a15d2ad5320e3331eac07626dd
+
+uucode-Unicode-LICENSE.txt
+Source: .build/licenses/extracted/uucode-Unicode-LICENSE.txt
+SHA-256: 1eda5a3b026870c737b22e8bcd4954338612c790db688242e003f41a4fa95175
+
+simdutf-LICENSE-MIT.txt
+Source: .build/licenses/extracted/simdutf-LICENSE-MIT.txt
+SHA-256: fc8dbc04e03ad4efc08a647ffe7f995b811a95bc04c0e85a56d5277c6593fa5f
+
+simdutf-LICENSE-APACHE.txt
+Source: .build/licenses/extracted/simdutf-LICENSE-APACHE.txt
+SHA-256: 3d34610fc6b5e1b0bfe4e2f36171c2d62c28ef05cb8d704f5a0073be41a43b3d
+
+simdutf-isadetection-NOTICE.txt
+Source: .build/licenses/extracted/simdutf-isadetection-NOTICE.txt
+SHA-256: 204bbed08ddeeecb362b4da36d3479a0167b7356a9d6024a24f9833affbe228a
+
+Highway-LICENSE-APACHE.txt
+Source: .build/dependencies/ghostty/zig-pkg/N-V-__8AAGmZhABbsPJLfbqrh6JTHsXhY6qCaLAQyx25e0XE/LICENSE
+SHA-256: 43070e2d4e532684de521b885f385d0841030efa2b1a20bafb76133a5e1379c1
+
+Highway-LICENSE-BSD3.txt
+Source: .build/dependencies/ghostty/zig-pkg/N-V-__8AAGmZhABbsPJLfbqrh6JTHsXhY6qCaLAQyx25e0XE/LICENSE-BSD3
+SHA-256: d25e82e26acd42ca3ccc9993622631163425b869b9e16284226d534cff6470f2
+
+Wuffs-LICENSE.txt
+Source: .build/dependencies/ghostty/zig-pkg/N-V-__8AAP5JWgCGP_AD0teWpa4krRvE9VPZzvviGdbmN4jI/LICENSE
+SHA-256: f8ac2c75e7f629a87565c80d61ff9fe5aa15cdea0bda997d52a4dc13fdbd19cb
+
+Nerd-Fonts-LICENSE.md
+Source: .build/dependencies/ghostty/vendor/nerd-fonts/LICENSE
+SHA-256: 1f6ad4edae6479aaace3112ede5279a23284ae54b2a34db66357aef5f64df160
+
