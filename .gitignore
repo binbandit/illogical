@@ -1,0 +1,9 @@
+.build/
+.DS_Store
+xcuserdata/
+*.xcuserstate
+DerivedData/
+research/superlogical/frames/
+.env
+.env.*
+!.env.example
