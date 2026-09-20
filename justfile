@@ -9,6 +9,11 @@ build:
 test:
     ./scripts/test.sh
 
+# Build and run the native Debug app in the foreground.
+dev:
+    CONFIGURATION=Debug ./scripts/build.sh
+    ./.build/xcode/Build/Products/Debug/illogical.app/Contents/MacOS/illogical
+
 # Install the Release app and CLI without interrupting terminal processes.
 install:
     ./scripts/install.sh
