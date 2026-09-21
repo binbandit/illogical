@@ -91,7 +91,11 @@ final class WorkspaceModel: ObservableObject {
     @Published var renameTarget = "session"
     @Published var renameValue = ""
     @Published var notice: String?
-    @Published var peek: CGFloat = 0
+    @Published var peek: CGFloat = 0 { didSet { if !isPeekGestureActive { peekExpanded = peek >= 1.5 } } }
+    @Published private(set) var isPeekGestureActive = false
+    @Published private(set) var peekExpanded = false
+    private var peekGestureStart: CGFloat = 0
+    private var keyboardFocusIntent: UUID?
     @Published var sidebarFilter = ""
     @Published var showPaneTitles: Bool { didSet { preferences.set(showPaneTitles, forKey: "showPaneTitles") } }
     @Published private(set) var searches: [String: TerminalSearchState] = [:]
@@ -150,6 +154,7 @@ final class WorkspaceModel: ObservableObject {
     private var processLookups: [String: Task<Void, Never>] = [:]
     private var processVersions: [String: String] = [:]
     private var pendingBlock: String?
+    private var closingBlocks = Set<String>()
     private var pendingPaneNavigation: (host: String, session: String, deck: String, block: String, request: String)?
     private var renameContext: (host: String, session: String, window: String?)?
     var onLaunchStage: ((String) -> Void)?
@@ -234,6 +239,7 @@ final class WorkspaceModel: ObservableObject {
             states[host]=state
             if let pending = pendingPaneNavigation, pending.host == host {
                 let deck = state.sessions.first { $0.id == pending.session }?.windows.first { $0.id == pending.deck }
+                if deck?.zoomed == pending.block, selectedHost == host, selectedSession == pending.session, selectedDeck == pending.deck { focus(pending.block) }
                 if deck?.zoomed == pending.block || deck?.root.blocks.contains(pending.block) != true { pendingPaneNavigation = nil }
             }
             let valid=Set(state.blocks.map(\.id))
@@ -250,14 +256,15 @@ final class WorkspaceModel: ObservableObject {
                     if !session.windows.contains(where:{$0.id==selectedDeck}){selectedDeck=session.windows.first?.id ?? ""}
                     if let deck=activeDeck {
                         let preferred = preferredBlock(in: deck)
-                        if focusedBlock != preferred { focus(preferred) }
+                        if focusedBlock != preferred { focus(preferred, explicit: false) }
                     }
-                } else if let first=state.sessions.first { choose(session:first.id,host:host) }
+                } else if let first=state.sessions.first { choose(session:first.id,host:host,explicit:false) }
                 else { selectedSession="";selectedDeck="";focusedBlock="" }
             }
             if palette == .directory && !directoryContextIsCurrent { palette = nil }
         }
         if let block=message.block {
+            if message.event == "block_closed", engineHosts[block] == host { retireEngine(block) }
             if ["snapshot","history","output","resize","theme","graphics","resume","resync"].contains(message.type) {
                 if message.type == "snapshot" { onLaunchStage?("snapshotReceived") }
                 engines[block]?.receive(message)
@@ -299,7 +306,7 @@ final class WorkspaceModel: ObservableObject {
                 // Shell title changes may precede giving the job its foreground
                 // process group. Coalesce that transition without polling.
                 try? await Task.sleep(for: .milliseconds(120))
-                guard !Task.isCancelled, let self, self.processVersions[block.id] == version else { return }
+                guard !Task.isCancelled, let self, !self.closingBlocks.contains(block.id), self.processVersions[block.id] == version else { return }
                 self.processLookups.removeValue(forKey: block.id)
                 self.send(WireRequest(method: "block.process", block: block.id), host: host) { [weak self] message in
                     guard let self, self.processVersions[block.id] == version else { return }
@@ -335,10 +342,22 @@ final class WorkspaceModel: ObservableObject {
         if let engine=engines[block]{return engine}
         let host=host ?? selectedHost
         let engine=TerminalEngine(blockID:block,theme:theme)
+        // SwiftUI can reevaluate an outgoing pane after state has deleted it.
+        // Give that transient view an inert replica without caching or attaching.
+        guard !closingBlocks.contains(block), states[host]?.blocks.contains(where: { $0.id == block }) != false else { return engine }
         engines[block]=engine;engineHosts[block]=host
-        engine.onInput={ [weak self] data in self?.send(WireRequest(method:"block.write",block:block,data:data),host:host) }
-        engine.onResize={ [weak self] cols,rows,width,height in self?.send(WireRequest(method:"block.resize",block:block,cols:cols,rows:rows,cellWidth:width,cellHeight:height),host:host) }
-        engine.onReplayGap = { [weak self] in self?.send(WireRequest(method: "block.attach", block: block), host: host) }
+        engine.onInput={ [weak self] data in
+            guard let self, !self.closingBlocks.contains(block) else { return }
+            self.send(WireRequest(method:"block.write",block:block,data:data),host:host)
+        }
+        engine.onResize={ [weak self] cols,rows,width,height in
+            guard let self, !self.closingBlocks.contains(block) else { return }
+            self.send(WireRequest(method:"block.resize",block:block,cols:cols,rows:rows,cellWidth:width,cellHeight:height),host:host)
+        }
+        engine.onReplayGap = { [weak self] in
+            guard let self, !self.closingBlocks.contains(block) else { return }
+            self.send(WireRequest(method: "block.attach", block: block), host: host)
+        }
         engine.onError={ [weak self] error in self?.notice=error }
         engine.onSearch={ [weak self] total,index,row in
             self?.searches[block]?.receive(count: total, selected: index, row: row)
@@ -354,29 +373,31 @@ final class WorkspaceModel: ObservableObject {
     }
 
     private func configureViewport(_ engine: TerminalEngine, block: String, host: String) {
+        guard !closingBlocks.contains(block) else { return }
         guard supportsViewportSync(host: host) else { engine.onViewportChange = nil;return }
         if synchronizeViewports {
             engine.onViewportChange = { [weak self] distance in
-                self?.send(WireRequest(method: "block.viewport", block: block, viewport: distance), host: host)
+                guard let self, !self.closingBlocks.contains(block) else { return }
+                self.send(WireRequest(method: "block.viewport", block: block, viewport: distance), host: host)
             }
         } else { engine.onViewportChange = nil }
         send(WireRequest(method: "block.viewport", block: block, synchronized: synchronizeViewports), host: host)
     }
 
-    func choose(session:String,host:String) {
+    func choose(session:String,host:String,explicit:Bool = true) {
         pendingPaneNavigation = nil
         selectedHost=host;selectedSession=session
         let available=states[host]?.sessions.first{$0.id==session}?.windows ?? []
         selectedDeck=available.first{$0.id==rememberedDecks[host]?[session]}?.id ?? available.first?.id ?? ""
-        palette=nil;peek=0
-        saveSelection();focus(activeDeck.map(preferredBlock) ?? "")
+        palette=nil;isPeekGestureActive=false;peek=0
+        saveSelection();focus(activeDeck.map(preferredBlock) ?? "", explicit: explicit)
     }
 
     func choose(deck:String,session:String?=nil,host:String?=nil) {
         pendingPaneNavigation = nil
         if let host{selectedHost=host};if let session{selectedSession=session}
         selectedDeck=deck;rememberedDecks[selectedHost, default: [:]][selectedSession]=deck
-        palette=nil;peek=0
+        palette=nil;isPeekGestureActive=false;peek=0
         saveSelection();focus(activeDeck.map(preferredBlock) ?? "")
     }
 
@@ -423,17 +444,33 @@ final class WorkspaceModel: ObservableObject {
         return blocks.first ?? ""
     }
 
-    func focus(_ block:String) {
+    func focus(_ block:String, explicit: Bool = true) {
         var block = block
+        let host = engineHosts[block] ?? selectedHost
+        if !block.isEmpty {
+            guard !closingBlocks.contains(block) else { return }
+            if let deck = activeDeck {
+                guard deck.root.blocks.contains(block) else { return }
+            } else {
+                guard states[host]?.blocks.contains(where: { $0.id == block }) != false else { return }
+            }
+        }
         if let deck = activeDeck, deck.root.blocks.contains(block) {
             if let zoomed = deck.zoomed, deck.root.blocks.contains(zoomed) { block = zoomed }
             rememberedBlocks[selectedHost, default: [:]][deck.id] = block
         }
         searchFocusedBlock = nil
         focusedBlock=block;focusToken=UUID();engines[block]?.requestedSize = nil
+        keyboardFocusIntent = explicit ? focusToken : nil
         if palette == .directory && !directoryContextIsCurrent { palette = nil }
         guard !block.isEmpty else { return }
         send(WireRequest(method:"block.claim",block:block),host:engineHosts[block] ?? selectedHost)
+    }
+
+    func consumeKeyboardFocusIntent(_ token: UUID?) -> Bool {
+        guard let token, token == keyboardFocusIntent else { return false }
+        keyboardFocusIntent = nil
+        return true
     }
 
     private func saveSelection(){preferences.set(selectedHost,forKey:"selectedHost");preferences.set(selectedSession,forKey:"selectedSession");preferences.set(selectedDeck,forKey:"selectedDeck")}
@@ -444,7 +481,7 @@ final class WorkspaceModel: ObservableObject {
         if let session=message.session{selectedSession=session}
         if let window=message.window{selectedDeck=window;rememberedDecks[host, default: [:]][selectedSession]=window}
         if let block=message.block{focusedBlock=block;pendingBlock=block}
-        saveSelection();palette=nil;peek=0;focusToken=UUID()
+        saveSelection();palette=nil;isPeekGestureActive=false;peek=0;focusToken=UUID();keyboardFocusIntent=focusToken
     }
 
     func newSession(name:String="",host:String?=nil) {
@@ -460,7 +497,19 @@ final class WorkspaceModel: ObservableObject {
         let host=selectedHost
         send(WireRequest(method:"block.split",block:block ?? focusedBlock,axis:axis),host:host){ [weak self] in self?.created($0,host:host) }
     }
-    func closeBlock(_ block:String?=nil){send(WireRequest(method:"block.kill",block:block ?? focusedBlock))}
+    func closeBlock(_ block: String? = nil) {
+        let block = block ?? focusedBlock
+        let host = engineHosts[block] ?? selectedHost
+        guard !block.isEmpty, let connection = connections[host], closingBlocks.insert(block).inserted else { return }
+        processLookups.removeValue(forKey: block)?.cancel()
+        connection.send(WireRequest(method: "block.kill", block: block)) { [weak self] message in
+            guard let self, message.error != nil else { return }
+            self.closingBlocks.remove(block)
+            self.engines[block]?.requestedSize = nil
+            self.processVersions.removeValue(forKey: block)
+            if let state = self.states[host] { self.refreshProcessIdentities(state, host: host) }
+        }
+    }
     func closeDeck(_ deck:String){send(WireRequest(method:"window.kill",window:deck))}
     func killSession(_ session:String,host:String){send(WireRequest(method:"session.kill",session:session),host:host)}
     func zoom(_ block:String?=nil){send(WireRequest(method:"window.zoom",window:selectedDeck,block:block ?? focusedBlock))}
@@ -517,9 +566,28 @@ final class WorkspaceModel: ObservableObject {
         searches.removeValue(forKey: block)
         if searchFocusedBlock == block { searchFocusedBlock = nil; focusToken = UUID() }
     }
-    func setPeek(_ progress:CGFloat,finished:Bool){
-        if finished { animateNavigation { peek=progress<0.3 ? 0 : (progress<1.35 ? 1 : 2) } }
-        else { peek=progress }
+    func setPeek(_ progress: CGFloat, finished: Bool) {
+        guard progress.isFinite else { return }
+        let progress = min(2, max(0, progress))
+        if finished {
+            let start = isPeekGestureActive ? peekGestureStart : peek
+            let closeThreshold: CGFloat = start == 0 ? 0.3 : 0.55
+            let expandThreshold: CGFloat = start == 2 ? 1.4 : 1.6
+            let target: CGFloat = progress < closeThreshold ? 0 : (progress < expandThreshold ? 1 : 2)
+            animateNavigation { isPeekGestureActive = false;peek = target }
+            if target == 0 { focusToken = UUID();keyboardFocusIntent = focusToken }
+        } else {
+            if !isPeekGestureActive { peekGestureStart = peek;isPeekGestureActive = true }
+            var transaction = Transaction(animation: nil)
+            transaction.disablesAnimations = true
+            withTransaction(transaction) { peek = progress }
+        }
+    }
+
+    func peekOffset(height: CGFloat) -> CGFloat {
+        let compact = min(216, max(0, height) * 0.48)
+        let progress = min(2, max(0, peek))
+        return progress <= 1 ? compact * progress : compact + (max(0, height) + 20 - compact) * (progress - 1)
     }
     func animateNavigation(_ change: () -> Void) {
         let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
@@ -527,7 +595,8 @@ final class WorkspaceModel: ObservableObject {
         transaction.disablesAnimations = reduceMotion
         withTransaction(transaction, change)
     }
-    func togglePeek(_ level: CGFloat) { animateNavigation { peek = peek == level ? 0 : level } }
+    func dismissPeek() { setPeek(0, finished: true) }
+    func togglePeek(_ level: CGFloat) { setPeek(peek == level ? 0 : level, finished: true) }
     func showDirectory() {
         cancelDirectory()
         guard let deck = activeDeck, deck.root.blocks.contains(focusedBlock) else { return }
@@ -613,9 +682,18 @@ final class WorkspaceModel: ObservableObject {
     }
     private func discardEngines(_ blocks:[String]) {
         guard !blocks.isEmpty else{return}
+        for block in blocks { retireEngine(block) }
         for block in blocks { closeSearch(block) }
         if let pendingBlock,blocks.contains(pendingBlock){self.pendingBlock=nil}
-        for block in blocks { engines.removeValue(forKey:block);engineHosts.removeValue(forKey:block);processLookups.removeValue(forKey:block)?.cancel();processIdentities.removeValue(forKey:block);processVersions.removeValue(forKey:block) }
+        for block in blocks { engines.removeValue(forKey:block);engineHosts.removeValue(forKey:block);processLookups.removeValue(forKey:block)?.cancel();processIdentities.removeValue(forKey:block);processVersions.removeValue(forKey:block);closingBlocks.remove(block) }
+    }
+
+    private func retireEngine(_ block: String) {
+        // AppKit may lay out or resign focus on a view retained through SwiftUI
+        // teardown. A removed terminal must stop submitting service requests.
+        guard let engine = engines[block] else { return }
+        engine.onInput = nil;engine.onResize = nil;engine.onReplayGap = nil;engine.onViewportChange = nil
+        processLookups.removeValue(forKey: block)?.cancel()
     }
 
     func importGhostty(){

@@ -3,6 +3,58 @@ import MetalKit
 import SwiftUI
 
 @MainActor
+private struct PeekTouchGesture {
+    struct Contact {
+        let identity: any NSObjectProtocol
+        let position: CGPoint
+    }
+    private var contacts: [Contact] = []
+    private var origin = CGPoint.zero
+    private var start: CGFloat = 0
+    private var progress: CGFloat = 0
+    private var direction: CGFloat = 0
+    private var blocked = false
+
+    mutating func update(_ current: [Contact], initialProgress: CGFloat) -> (CGFloat, Bool)? {
+        guard !blocked else { return nil }
+        if contacts.isEmpty {
+            guard current.count == 3 else { return nil }
+            contacts = current;origin = centroid(current);start = initialProgress;progress = start
+            return nil
+        }
+        guard current.count == 3, contacts.allSatisfy({ old in current.contains { old.identity.isEqual($0.identity) } }) else { return cancel() }
+        let point = centroid(current)
+        let vertical = origin.y - point.y, horizontal = point.x - origin.x
+        let slop: CGFloat = 8
+        if direction == 0 {
+            guard max(abs(vertical), abs(horizontal)) >= slop else { return nil }
+            guard abs(vertical) > abs(horizontal) * 1.4,
+                  !(start == 0 && vertical < 0), !(start == 2 && vertical > 0) else { blocked = true;return nil }
+            direction = vertical > 0 ? 1 : -1
+        }
+        progress = min(2, max(0, start + (vertical - direction * slop) / 64))
+        return (progress, false)
+    }
+
+    mutating func end(remaining: Int) -> (CGFloat, Bool)? {
+        let result: (CGFloat, Bool)? = direction == 0 ? nil : (progress, true)
+        contacts = [];direction = 0;blocked = remaining != 0
+        return result
+    }
+
+    mutating func cancel() -> (CGFloat, Bool)? {
+        let result: (CGFloat, Bool)? = direction == 0 ? nil : (start, true)
+        blocked = blocked || !contacts.isEmpty;contacts = [];direction = 0
+        return result
+    }
+
+    private func centroid(_ contacts: [Contact]) -> CGPoint {
+        CGPoint(x: contacts.reduce(0) { $0 + $1.position.x } / CGFloat(contacts.count),
+                y: contacts.reduce(0) { $0 + $1.position.y } / CGFloat(contacts.count))
+    }
+}
+
+@MainActor
 final class TerminalMetalView: MTKView {
     var onDisplayEnvironmentChange: (() -> Void)?
 
@@ -27,9 +79,11 @@ struct TerminalSurface: NSViewRepresentable {
     let focused: Bool
     let focusToken: UUID
     var interactive = true
+    var peekProgress: CGFloat = 0
     var contrast = true
     var fontOptions: TerminalFontOptions = .defaults
     var onFocus: () -> Void = {}
+    var onRequestEditorFocus: (UUID?) -> Bool = { _ in false }
     var onPeek: (CGFloat, Bool) -> Void = { _, _ in }
     var onCellSize: (CGSize) -> Void = { _ in }
     var copyOnSelection = false
@@ -38,7 +92,11 @@ struct TerminalSurface: NSViewRepresentable {
 
     func makeNSView(context: Context) -> NativeTerminalView { NativeTerminalView(engine: engine) }
     func updateNSView(_ view: NativeTerminalView, context: Context) {
+        let layoutChanged = view.interactive != interactive || view.renderer?.fontSize != fontSize || view.renderer?.fontName != fontName || view.renderer?.fontOptions != fontOptions
+        let drawingChanged = layoutChanged || view.renderer?.focused != focused || view.renderer?.contrastCorrection != contrast
         view.interactive = interactive;view.onFocus = onFocus;view.onPeek = onPeek;view.onCellSize = onCellSize
+        view.onRequestEditorFocus = onRequestEditorFocus
+        view.peekProgress = peekProgress
         view.copyOnSelection = copyOnSelection;view.onCopy = onCopy;view.onLink = onLink
         view.renderer?.fontSize = fontSize;view.renderer?.fontName = fontName
         view.renderer?.fontOptions = fontOptions
@@ -50,7 +108,8 @@ struct TerminalSurface: NSViewRepresentable {
             view.focusToken = focusToken
             view.requestKeyboardFocus()
         }
-        view.needsLayout = true;view.renderer?.requestDraw()
+        if layoutChanged { view.needsLayout = true }
+        if drawingChanged { view.renderer?.requestDraw() }
     }
     static func dismantleNSView(_ view: NativeTerminalView, coordinator: ()) { view.detach() }
 }
@@ -72,7 +131,7 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
     var renderer: MetalTerminalRenderer?
     var interactive = true {
         didSet {
-            if oldValue && !interactive { reportTerminalFocus(false);cancelSelectionDrag() }
+            if oldValue && !interactive { reportTerminalFocus(false);cancelSelectionDrag();cancelPeekGesture() }
             if interactive != oldValue { updateCursorBlink();updateTrackingAreas() }
         }
     }
@@ -81,7 +140,14 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
         didSet { if wantsKeyboardFocus && !oldValue { requestKeyboardFocus() } }
     }
     var onFocus: () -> Void = {}
+    var onRequestEditorFocus: (UUID?) -> Bool = { _ in false }
     var onPeek: (CGFloat, Bool) -> Void = { _, _ in }
+    var peekProgress: CGFloat = 0 {
+        didSet {
+            if peekProgress > 0 && oldValue == 0 { cancelSelectionDrag();unmarkText();forwardedKeyPresses.removeAll();composingKeyReleases.removeAll() }
+            if (peekProgress == 0) != (oldValue == 0) { updateCursorBlink() }
+        }
+    }
     var onCellSize: (CGSize) -> Void = { _ in }
     private var reportedCellSize: CGSize?
     private var frameInfo = ILFrame()
@@ -98,8 +164,7 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
     private(set) var selectionAutoscrollTimer: Timer?
     private(set) var cursorBlinkTimer: Timer?
     private var detached = false
-    private var touchStart: CGFloat?
-    private var touchProgress: CGFloat = 0
+    private var peekGesture = PeekTouchGesture()
     private var keyboardFocusScheduled = false
     private var mouseTracking: NSTrackingArea?
     private var reportedTerminalFocus = false
@@ -123,7 +188,7 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
         scrollbar.isHidden = true;addSubview(scrollbar)
         composition.isHidden = true;composition.drawsBackground = true;composition.isBordered = false;addSubview(composition)
         copyFeedback.isHidden = true;addSubview(copyFeedback)
-        allowedTouchTypes = [.indirect];wantsRestingTouches = true
+        allowedTouchTypes = [.indirect];wantsRestingTouches = false
         setAccessibilityElement(true);setAccessibilityRole(.textArea);setAccessibilityLabel("Terminal")
         renderer?.onFrame = { [weak self] frame in self?.didRender(frame) }
     }
@@ -131,7 +196,7 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     isolated deinit { cursorBlinkTimer?.invalidate();selectionAutoscrollTimer?.invalidate();feedbackDismissal?.cancel() }
     override var isFlipped: Bool { true }
-    override var acceptsFirstResponder: Bool { interactive }
+    override var acceptsFirstResponder: Bool { interactive && peekProgress == 0 }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     override func becomeFirstResponder() -> Bool {
         renderer?.focused = true;renderer?.requestDraw()
@@ -147,7 +212,7 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
     func detach() {
         wantsKeyboardFocus = false
         detached = true
-        cancelSelectionDrag()
+        cancelSelectionDrag();cancelPeekGesture()
         reportTerminalFocus(false)
         feedbackDismissal?.cancel();feedbackDismissal = nil
         cursorBlinkTimer?.invalidate();cursorBlinkTimer = nil
@@ -162,7 +227,7 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        if window == nil { cancelSelectionDrag() }
+        if window == nil { cancelSelectionDrag();cancelPeekGesture() }
         NotificationCenter.default.removeObserver(self, name: NSWindow.didChangeOcclusionStateNotification, object: nil)
         NotificationCenter.default.removeObserver(self, name: NSWindow.didChangeScreenNotification, object: nil)
         NotificationCenter.default.removeObserver(self, name: NSWindow.didChangeBackingPropertiesNotification, object: nil)
@@ -187,12 +252,13 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.keyboardFocusScheduled = false
-            guard self.interactive, self.wantsKeyboardFocus, !self.isHiddenOrHasHiddenAncestor,
-                  let window = self.window, window.attachedSheet == nil,
-                  window.firstResponder !== self else { return }
+            guard self.interactive, self.peekProgress == 0, self.wantsKeyboardFocus, !self.isHiddenOrHasHiddenAncestor,
+                  let window = self.window, window.attachedSheet == nil else { return }
+            let replaceEditor = self.onRequestEditorFocus(self.focusToken)
+            guard window.firstResponder !== self else { return }
             // Mounting or reactivating a terminal must preserve an editor that
             // already acquired focus, even before SwiftUI updates its flags.
-            if let responder = window.firstResponder, responder is NSTextView || responder is NSControl { return }
+            if let responder = window.firstResponder, responder is NSTextView || responder is NSControl, !replaceEditor { return }
             window.makeFirstResponder(self)
         }
     }
@@ -202,15 +268,15 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
     }
 
     override func viewDidUnhide() { super.viewDidUnhide();updateCursorBlink();renderer?.requestDraw() }
-    override func viewDidHide() { super.viewDidHide();cancelSelectionDrag();updateCursorBlink();renderer?.requestDraw() }
+    override func viewDidHide() { super.viewDidHide();cancelSelectionDrag();cancelPeekGesture();updateCursorBlink();renderer?.requestDraw() }
     @objc private func displayEnvironmentChanged(_ notification: Notification) {
         needsLayout = true
-        if notification.name == NSWindow.didResignKeyNotification || window?.occlusionState.contains(.visible) != true { cancelSelectionDrag() }
+        if notification.name == NSWindow.didResignKeyNotification || window?.occlusionState.contains(.visible) != true { cancelSelectionDrag();cancelPeekGesture() }
         updateCursorBlink();renderer?.requestDraw()
     }
 
     private var canBlinkCursor: Bool {
-        !detached && interactive && renderer?.focused == true && frameInfo.cursorBlinking
+        !detached && interactive && peekProgress == 0 && renderer?.focused == true && frameInfo.cursorBlinking
             && frameInfo.cursorVisible && !isHiddenOrHasHiddenAncestor && !metal.isHiddenOrHasHiddenAncestor
             && window?.isKeyWindow == true && window?.firstResponder === self
             && window?.occlusionState.contains(.visible) == true
@@ -224,7 +290,7 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
 
     func updateCursorBlink(reset: Bool = false) {
         if interactive {
-            reportTerminalFocus(!detached && !isHiddenOrHasHiddenAncestor && window?.isKeyWindow == true && window?.firstResponder === self)
+            reportTerminalFocus(!detached && peekProgress == 0 && !isHiddenOrHasHiddenAncestor && window?.isKeyWindow == true && window?.firstResponder === self)
         }
         guard canBlinkCursor else {
             cursorBlinkTimer?.invalidate();cursorBlinkTimer = nil
@@ -303,6 +369,10 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
 
     override func keyDown(with event: NSEvent) {
         guard interactive else{return}
+        if peekProgress > 0 {
+            if event.keyCode == 53 { cancelPeekGesture(reset: false);onPeek(0, true) }
+            return
+        }
         renderer?.cursorOn=true
         updateCursorBlink(reset: true)
         composingKeyReleases.remove(event.keyCode)
@@ -319,7 +389,7 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
     override func keyUp(with event: NSEvent) {
         let forwarded = forwardedKeyPresses.remove(event.keyCode) != nil
         let composed = composingKeyReleases.remove(event.keyCode) != nil
-        guard interactive, forwarded, !composed, !hasMarkedText() else { return }
+        guard interactive, peekProgress == 0, forwarded, !composed, !hasMarkedText() else { return }
         engine.key(event,release:true)
     }
 
@@ -329,7 +399,7 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
     }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        guard interactive, window?.firstResponder === self, event.type == .keyDown,
+        guard interactive, peekProgress == 0, window?.firstResponder === self, event.type == .keyDown,
               event.modifierFlags.contains(.control), !event.modifierFlags.contains(.command) else { return false }
         let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask).subtracting([.capsLock, .numericPad])
         if event.keyCode == 48 && (modifiers == .control || modifiers == [.control, .shift]) { return false }
@@ -338,7 +408,7 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
     }
 
     override func flagsChanged(with event: NSEvent) {
-        guard interactive, !hasMarkedText() else { return }
+        guard interactive, peekProgress == 0, !hasMarkedText() else { return }
         let flag: NSEvent.ModifierFlags
         switch event.keyCode {
         case 54, 55: flag = .command
@@ -356,12 +426,14 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
     }
 
     func insertText(_ string: Any, replacementRange: NSRange) {
+        guard interactive, peekProgress == 0 else { return }
         let text=(string as? NSAttributedString)?.string ?? (string as? String ?? "")
         let wasMarked=hasMarkedText() || composingAtKeyDown;unmarkText()
         if wasMarked, text.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7f }) { return }
         if let event=insertionEvent,!wasMarked{forwardKeyDown(event,text:text)}else{engine.send(Data(text.utf8))}
     }
     func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
+        guard interactive, peekProgress == 0 else { return }
         marked=(string as? NSAttributedString) ?? NSAttributedString(string:string as? String ?? "")
         markedSelection = selectedRange
         updateComposition()
@@ -386,13 +458,14 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
     }
 
     @objc func copy(_ sender: Any?) {
+        guard interactive, peekProgress == 0 else { return }
         guard interactive, let text = engine.copy(), !text.isEmpty else { return }
         pasteboard.clearContents()
         guard pasteboard.setString(text, forType: .string) else { return }
         onCopy(text);showCopyFeedback()
     }
-    @objc func paste(_ sender: Any?) { if let text=pasteboard.string(forType:.string){engine.paste(text)} }
-    @objc override func selectAll(_ sender: Any?) { engine.selectAll() }
+    @objc func paste(_ sender: Any?) { guard interactive, peekProgress == 0 else { return };if let text=pasteboard.string(forType:.string){engine.paste(text)} }
+    @objc override func selectAll(_ sender: Any?) { guard interactive, peekProgress == 0 else { return };engine.selectAll() }
 
     private func selectionPoint(_ event: NSEvent) -> NSPoint {
         let point = convert(event.locationInWindow, from: nil)
@@ -412,7 +485,7 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
         }
     }
     override func mouseMoved(with event: NSEvent) {
-        guard interactive, !event.modifierFlags.contains(.shift), let cell = renderer?.cell else { return }
+        guard interactive, peekProgress == 0, !event.modifierFlags.contains(.shift), let cell = renderer?.cell else { return }
         _ = terminalMouse(event, action: 2, button: 0, point: localPoint(event), cell: cell)
     }
     private func terminalMouse(_ event: NSEvent, action: Int32, button: Int32, point: NSPoint, cell: NSSize) -> Bool {
@@ -422,7 +495,7 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
                             cell: NSSize(width: cell.width * scale, height: cell.height * scale))
     }
     private func sendMouse(_ event: NSEvent, action: Int32, button: Int32) -> Bool {
-        guard interactive, !event.modifierFlags.contains(.shift), let cell = renderer?.cell else { return false }
+        guard interactive, peekProgress == 0, !event.modifierFlags.contains(.shift), let cell = renderer?.cell else { return false }
         if action == 0 { window?.makeFirstResponder(self);onFocus() }
         return terminalMouse(event, action: action, button: button, point: localPoint(event), cell: cell)
     }
@@ -435,7 +508,9 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
     override func otherMouseDragged(with event: NSEvent) { if !sendMouse(event, action: 2, button: extraMouseButton(event)) { super.otherMouseDragged(with: event) } }
     override func mouseDown(with event:NSEvent){
         stopSelectionAutoscroll();selectionDragEvent = nil
-        guard interactive,let cell=renderer?.cell else{return};window?.makeFirstResponder(self);onFocus()
+        guard interactive,let cell=renderer?.cell else{return}
+        if peekProgress > 0 { cancelPeekGesture(reset: false);onPeek(0, true);return }
+        window?.makeFirstResponder(self);onFocus()
         let point=localPoint(event);openedLinkOnMouseDown = false
         if event.modifierFlags.contains(.command),let url=engine.link(at:point,cell:cell){cancelSelectionDrag();openedLinkOnMouseDown = true;onLink(url);openURL(url);return}
         if !event.modifierFlags.contains(.shift),terminalMouse(event,action:0,button:1,point:point,cell:cell){cancelSelectionDrag();return}
@@ -443,7 +518,7 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
         selectionDragEvent = event
     }
     override func mouseDragged(with event:NSEvent){
-        guard interactive,let cell=renderer?.cell else{return};let point=localPoint(event)
+        guard interactive,peekProgress == 0,let cell=renderer?.cell else{return};let point=localPoint(event)
         if !event.modifierFlags.contains(.shift),terminalMouse(event,action:2,button:1,point:point,cell:cell){cancelSelectionDrag();return}
         guard selectionDragEvent != nil else { return }
         selectionDragEvent = event
@@ -453,13 +528,13 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
     override func mouseUp(with event:NSEvent){
         stopSelectionAutoscroll();selectionDragEvent = nil
         if openedLinkOnMouseDown { openedLinkOnMouseDown = false;return }
-        guard interactive,let cell=renderer?.cell else{return};let point=localPoint(event)
+        guard interactive,peekProgress == 0,let cell=renderer?.cell else{return};let point=localPoint(event)
         if !event.modifierFlags.contains(.shift),terminalMouse(event,action:1,button:1,point:point,cell:cell){cancelSelectionDrag();return}
         engine.select(event,action:2,point:selectionPoint(event),cell:cell)
         if copyOnSelection { copy(nil) }
     }
     override func scrollWheel(with event:NSEvent){
-        guard interactive,let cell=renderer?.cell else{return}
+        guard interactive,peekProgress == 0,let cell=renderer?.cell else{return}
         let precise = event.hasPreciseScrollingDeltas
         if scrollWasPrecise != precise || event.phase == .began {
             scrollRemainderX = 0;scrollRemainderY = 0;scrollWasPrecise = precise
@@ -524,20 +599,27 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
         else { updateSelectionAutoscroll() }
     }
     override func menu(for event:NSEvent)->NSMenu?{
-        guard interactive else{return nil};let menu=NSMenu();menu.addItem(withTitle:"Copy",action:#selector(copy(_:)),keyEquivalent:"");menu.addItem(withTitle:"Paste",action:#selector(paste(_:)),keyEquivalent:"");menu.addItem(withTitle:"Select All",action:#selector(selectAll(_:)),keyEquivalent:"");for item in menu.items{item.target=self};return menu
+        guard interactive,peekProgress == 0 else{return nil};let menu=NSMenu();menu.addItem(withTitle:"Copy",action:#selector(copy(_:)),keyEquivalent:"");menu.addItem(withTitle:"Paste",action:#selector(paste(_:)),keyEquivalent:"");menu.addItem(withTitle:"Select All",action:#selector(selectAll(_:)),keyEquivalent:"");for item in menu.items{item.target=self};return menu
     }
-    override func touchesBegan(with event:NSEvent){
-        let touches=event.touches(matching:.touching,in:self)
-        if touches.count==3{touchStart=touches.reduce(0){$0+$1.normalizedPosition.y}/3;touchProgress=0}
+    private func movePeekGesture(_ event: NSEvent) {
+        guard interactive, !detached else { return }
+        let contacts = event.touches(matching: .touching, in: self).filter { !$0.isResting }.map {
+            PeekTouchGesture.Contact(identity: $0.identity, position: CGPoint(x: $0.normalizedPosition.x * $0.deviceSize.width,
+                                                                            y: $0.normalizedPosition.y * $0.deviceSize.height))
+        }
+        if let (progress, finished) = peekGesture.update(contacts, initialProgress: peekProgress) { onPeek(progress, finished) }
     }
-    override func touchesMoved(with event:NSEvent){
-        let touches=event.touches(matching:.touching,in:self)
-        guard interactive,touches.count==3,let start=touchStart else{return}
-        let average=touches.reduce(0){$0+$1.normalizedPosition.y}/3
-        touchProgress=min(2,max(0,(start-average)*8));onPeek(touchProgress,false)
+    private func cancelPeekGesture(reset: Bool = true) {
+        if let (progress, finished) = peekGesture.cancel() { onPeek(progress, finished) }
+        if reset { peekGesture = PeekTouchGesture() }
     }
-    override func touchesEnded(with event:NSEvent){if touchStart != nil{onPeek(touchProgress,true);touchStart=nil}}
-    override func touchesCancelled(with event:NSEvent){if touchStart != nil{onPeek(0,true);touchStart=nil}}
+    override func touchesBegan(with event: NSEvent) { movePeekGesture(event) }
+    override func touchesMoved(with event: NSEvent) { movePeekGesture(event) }
+    override func touchesEnded(with event: NSEvent) {
+        guard interactive, !detached else { return }
+        if let (progress, finished) = peekGesture.end(remaining: event.touches(matching: .touching, in: self).count) { onPeek(progress, finished) }
+    }
+    override func touchesCancelled(with event: NSEvent) { cancelPeekGesture();_ = peekGesture.end(remaining: 0) }
 
     private func showCopyFeedback() {
         guard !detached, !isHiddenOrHasHiddenAncestor, window?.occlusionState.contains(.visible) == true,

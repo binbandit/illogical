@@ -62,6 +62,8 @@ Useful shortcuts:
 | Zoom pane | Shift-Command-Return |
 | Close focused pane | Command-W or Shift-Command-W |
 
+Drag down with three fingers to reveal tab previews, or continue farther to open the session overview. Small and sideways movements leave the workspace in place. Press Escape or click the close control to return; clicking the visible terminal also dismisses tab previews. Terminal input pauses while previews or the overview are open.
+
 ## Service and CLI
 
 The default service directory is `~/.local/share/illogical`. The service directory and socket are private to the current user. `ILLOGICAL_HOME` and `ILLOGICAL_SOCKET` select an isolated development instance. The service starts automatically on the first connection.

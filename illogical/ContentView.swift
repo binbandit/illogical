@@ -32,6 +32,7 @@ struct ContentView: View {
         .sheet(isPresented: $model.showSettings) { AppearanceSettings(model: model) }
         .sheet(isPresented: $model.showAddHost) { AddHostSheet(model: model) }
         .sheet(isPresented: $model.showRename) { RenameSheet(model: model) }
+        .onExitCommand { if model.peek > 0 { model.dismissPeek() } }
         .sheet(isPresented: Binding(get: { !model.migration.isEmpty }, set: { if !$0 { model.migration = [] } })) { MigrationSheet(model: model) }
         .alert("illogical", isPresented: Binding(get: { model.notice != nil }, set: { if !$0 { model.notice = nil } })) {
             Button("OK") { model.notice = nil }
@@ -41,10 +42,10 @@ struct ContentView: View {
     private var workspaceArea: some View {
         GeometryReader { geometry in
             ZStack(alignment: .top) {
-                if model.peek > 0 { WorkspaceOverview(model: model, expanded: model.peek > 1.35).padding(12).opacity(min(1, model.peek * 2)) }
+                if model.peek > 0 { WorkspaceOverview(model: model, expanded: model.peekExpanded).padding(12).opacity(min(1, model.peek * 2)) }
                 workspace.frame(width: geometry.size.width, height: geometry.size.height)
-                    .offset(y: model.peek > 1.35 ? geometry.size.height + 20 : 190 * model.peek)
-                    .allowsHitTesting(model.peek < 0.1)
+                    .offset(y: model.peekOffset(height: geometry.size.height))
+                    .accessibilityHidden(model.peek > 0)
             }.clipped()
         }
     }
@@ -113,6 +114,7 @@ struct WorkspaceTitlebar: View {
                         }.padding(.vertical, 3)
                     }.scrollIndicators(.hidden)
                         .onChange(of: model.selectedDeck) { reader.scrollTo(model.selectedDeck, anchor: .center) }
+                        .onChange(of: model.activeSession?.windows.map(\.id) ?? []) { reader.scrollTo(model.selectedDeck, anchor: .center) }
                         .onAppear { reader.scrollTo(model.selectedDeck, anchor: .center) }
                 }
             } else { Spacer() }
@@ -164,12 +166,10 @@ struct DeckTab: View {
     var body: some View {
         HStack(spacing: 8) {
             DeckIcon(count: deck.root.blocks.count, symbol: deck.root.blocks.first.map { model.processIcon($0, host: host) } ?? "terminal")
-            Text(highlightedTitle).font(.system(size: 12, weight: selected ? .medium : .regular)).lineLimit(1)
+            Text(highlightedTitle).font(.system(size: 12, weight: .medium)).lineLimit(1)
             if vertical { Spacer(minLength: 0) }
-            if hovering {
-                Button { model.send(WireRequest(method: "window.kill", window: deck.id), host: host) } label: { Image(systemName: "xmark").font(.system(size: 8, weight: .semibold)) }
-                    .buttonStyle(.plain).accessibilityLabel("Close tab")
-            }
+            Button { model.send(WireRequest(method: "window.kill", window: deck.id), host: host) } label: { Image(systemName: "xmark").font(.system(size: 8, weight: .semibold)).frame(width: 12, height: 18) }
+                .buttonStyle(.plain).opacity(hovering ? 1 : 0).allowsHitTesting(hovering).accessibilityHidden(!hovering).accessibilityLabel("Close tab")
         }
         .padding(.horizontal, 11).frame(minWidth: vertical ? 0 : 105, maxWidth: vertical ? .infinity : 230).frame(height: 31)
         .background(selected ? (model.theme.isLight ? .white.opacity(0.7) : model.theme.text.opacity(0.09)) : Color.clear, in: Capsule())
@@ -181,6 +181,7 @@ struct DeckTab: View {
             Button("Close Tab") { model.send(WireRequest(method: "window.kill", window: deck.id), host: host) }
         }
         .accessibilityElement(children: .combine).accessibilityLabel(model.deckTitle(deck, host: host)).accessibilityAddTraits(.isButton)
+        .accessibilityAction(named: Text("Close tab")) { model.send(WireRequest(method: "window.kill", window: deck.id), host: host) }
     }
 }
 
@@ -218,6 +219,7 @@ struct WorkspaceSidebar: View {
                 }.padding(10)
             }
             .onChange(of: model.selectedHost + ":" + model.selectedDeck) { reader.scrollTo(model.selectedHost + ":" + model.selectedDeck, anchor: .center) }
+            .onChange(of: model.hosts.flatMap { host in (model.states[host.id]?.sessions ?? []).flatMap { $0.windows.map { host.id + ":" + $0.id } } }) { reader.scrollTo(model.selectedHost + ":" + model.selectedDeck, anchor: .center) }
             .onAppear { reader.scrollTo(model.selectedHost + ":" + model.selectedDeck, anchor: .center) }
             }
             HStack(spacing: 8) {
@@ -300,17 +302,21 @@ struct TerminalPane: View {
                     Text(info?.displayTitle ?? "Terminal").font(.system(size: 11, weight: .medium)).lineLimit(1).opacity(0.55)
                     if info?.parked == true { Image(systemName: "moon.zzz").font(.system(size: 9)).opacity(0.35).help("Emulator parked. Your process is still running.") }
                     Spacer(minLength: 4)
-                    if hovering {
+                    HStack(spacing: 6) {
                         paneButton("rectangle.split.2x1", label: "Split right") { model.split("horizontal", block: block) }
                         paneButton("rectangle.split.1x2", label: "Split down") { model.split("vertical", block: block) }
                         paneButton("arrow.up.left.and.arrow.down.right", label: "Zoom pane") { model.zoom(block) }
                         paneButton("xmark", label: "Close pane") { model.closeBlock(block) }
-                    }
+                    }.opacity(hovering ? 1 : 0).allowsHitTesting(hovering).accessibilityHidden(!hovering)
                 }.padding(.horizontal, 10).frame(height: 30).background(model.theme.color.opacity(model.theme.effectiveBackgroundOpacity)).contentShape(Rectangle())
+                    .allowsHitTesting(model.peek == 0)
                     .onTapGesture { model.focus(block) }
                     .onDrag { NSItemProvider(object: block as NSString) }
             }
-            TerminalSurface(engine: model.engine(for: block, host: host), fontSize: model.fontSize, fontName: model.fontName, focused: !preview && model.focusedBlock == block && model.searchFocusedBlock == nil && model.palette == nil && !model.showSettings && !model.showAddHost && !model.showRename, focusToken: model.focusToken, interactive: !preview, contrast: model.contrastCorrection, fontOptions: model.fontOptions, onFocus: { model.focus(block) }, onPeek: { model.setPeek($0, finished: $1) }, onCellSize: { cellSize = $0 }, copyOnSelection: model.copyOnSelection,
+            TerminalSurface(engine: model.engine(for: block, host: host), fontSize: model.fontSize, fontName: model.fontName, focused: !preview && model.peek == 0 && model.focusedBlock == block && model.searchFocusedBlock == nil && model.palette == nil && !model.showSettings && !model.showAddHost && !model.showRename, focusToken: model.focusToken, interactive: !preview, peekProgress: preview ? 0 : model.peek, contrast: model.contrastCorrection, fontOptions: model.fontOptions, onFocus: { model.focus(block) }, onRequestEditorFocus: { model.consumeKeyboardFocusIntent($0) }, onPeek: { progress, finished in
+                guard model.selectedHost == host, model.activeDeck?.root.blocks.contains(block) == true else { return }
+                model.setPeek(progress, finished: finished)
+            }, onCellSize: { cellSize = $0 }, copyOnSelection: model.copyOnSelection,
                             onCopy: { text in model.send(WireRequest(method: "block.event", block: block, label: "selection_copied", data: Data(text.utf8)), host: host) },
                             onLink: { url in model.send(WireRequest(method: "block.event", block: block, label: "url_clicked", data: Data(url.absoluteString.utf8)), host: host) })
                 .id(block + (preview ? ".preview" : ".terminal"))
@@ -322,6 +328,7 @@ struct TerminalPane: View {
             if !preview, let search = model.searches[block] {
                 TerminalSearchOverlay(model: model, search: search, block: block, cell: cellSize,
                                       titleHeight: model.showPaneTitles ? 30 : 0)
+                    .allowsHitTesting(model.peek == 0)
             }
         }
         .onHover { hovering = $0 }
@@ -411,12 +418,14 @@ struct TerminalSearchOverlay: View {
 struct WorkspaceOverview: View {
     @ObservedObject var model: WorkspaceModel
     let expanded: Bool
+    @FocusState private var closeFocused: Bool
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
                 Text(expanded ? "Sessions" : model.currentTitle).font(.system(size: 13, weight: .semibold))
                 Spacer()
-                Button { model.animateNavigation { model.peek = 0 } } label: { Image(systemName: "xmark.circle.fill").opacity(0.4) }.buttonStyle(.plain).accessibilityLabel("Close overview")
+                Button { model.dismissPeek() } label: { Image(systemName: "xmark.circle.fill").opacity(0.4).frame(width: 24, height: 24) }
+                    .buttonStyle(.plain).keyboardShortcut(.cancelAction).focused($closeFocused).help("Close overview (Esc)").accessibilityLabel("Close overview")
             }
             if expanded {
                 ScrollView {
@@ -436,15 +445,16 @@ struct WorkspaceOverview: View {
             } else {
                 ScrollView(.horizontal) { HStack(spacing: 14) { ForEach(model.activeSession?.windows ?? []) { deck in card(deck, session: model.selectedSession, host: model.selectedHost).frame(width: 245) } } }.scrollIndicators(.hidden)
             }
-        }
+        }.onAppear { closeFocused = true }
     }
     private func card(_ deck: Deck, session: String, host: String) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        Button { model.animateNavigation { model.choose(deck: deck.id, session: session, host: host) } } label: { VStack(alignment: .leading, spacing: 8) {
             LayoutSurface(model: model, node: deck.root, deck: deck.id, host: host, preview: true).frame(height: expanded ? 165 : 112).allowsHitTesting(false)
             HStack(spacing: 7) { DeckIcon(count: deck.root.blocks.count, symbol: deck.root.blocks.first.map { model.processIcon($0, host: host) } ?? "terminal"); Text(model.deckTitle(deck, host: host)).font(.system(size: 11)).lineLimit(1) }
         }.padding(8).background(model.theme.text.opacity(0.035), in: RoundedRectangle(cornerRadius: 12))
-            .overlay(RoundedRectangle(cornerRadius: 12).stroke(model.selectedDeck == deck.id ? model.theme.tint.opacity(0.6) : model.theme.border, lineWidth: 1))
-            .contentShape(Rectangle()).onTapGesture { model.animateNavigation { model.choose(deck: deck.id, session: session, host: host) } }
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(model.selectedDeck == deck.id && model.selectedHost == host ? model.theme.tint.opacity(0.6) : model.theme.border, lineWidth: 1))
+            .contentShape(Rectangle())
+        }.buttonStyle(.plain).accessibilityLabel(model.deckTitle(deck, host: host)).accessibilityHint("Open tab")
     }
 }
 

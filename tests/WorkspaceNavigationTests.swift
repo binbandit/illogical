@@ -52,6 +52,9 @@ nonisolated private final class NavigationPeer: @unchecked Sendable {
         }
         send(#"{"type":"hello","protocol":1,"engine":"ghostty-27e8b3fa85d9"}"#)
         var revision = 1
+        var rightRemoved = false
+        var holdClose = false
+        var pendingClose: String?
         var zoom: String? = "right"
         state(zoom: zoom, revision: revision)
         var framer = JSONLineFramer(maximumMessageSize: 1024 * 1024)
@@ -62,7 +65,19 @@ nonisolated private final class NavigationPeer: @unchecked Sendable {
             for line in lines {
                 guard let request = try? JSONDecoder().decode(Request.self, from: line) else { continue }
                 lock.lock();requests.append(request);lock.unlock()
+                if rightRemoved && request.block == "right" && ["block.resize", "block.write", "block.process", "block.attach", "block.theme", "block.claim"].contains(request.method) {
+                    send("{\"type\":\"error\",\"id\":\"\(request.id)\",\"error\":\"terminal block not found\"}")
+                    continue
+                }
                 switch request.method {
+                case "block.kill":
+                    if holdClose { pendingClose = request.id;continue }
+                    send("{\"type\":\"error\",\"id\":\"\(request.id)\",\"error\":\"Fixture close rejected\"}")
+                    continue
+                case "test.hold-close": holdClose = true
+                case "test.reject-close":
+                    send("{\"type\":\"error\",\"id\":\"\(pendingClose!)\",\"error\":\"Fixture close rejected\"}")
+                    pendingClose = nil
                 case "directory.list": continue // Tests control reply ordering and errors.
                 case "test.directory-success":
                     send("{\"type\":\"reply\",\"id\":\"\(request.target!)\",\"path\":\"\(request.cwd!)\",\"entries\":[{\"name\":\"child\",\"path\":\"\(request.cwd!)/child\"}]}")
@@ -74,6 +89,13 @@ nonisolated private final class NavigationPeer: @unchecked Sendable {
                     zoom = zoom == request.block ? nil : request.block
                 case "test.publish-zoom":
                     revision += 1;state(zoom: zoom, revision: revision)
+                case "test.drop-right":
+                    rightRemoved = true
+                    send(#"{"type":"event","event":"block_closed","block":"right","session":"session","window":"split-tab"}"#)
+                    if let pendingClose { send("{\"type\":\"reply\",\"id\":\"\(pendingClose)\"}") }
+                    pendingClose = nil
+                case "test.publish-removal":
+                    send(#"{"type":"state","state":{"revision":999,"sessions":[{"id":"session","name":"Primary","windows":[{"id":"split-tab","name":"Split","root":{"id":"left-root","block":"left"}}]}],"blocks":[{"id":"left","title":"sh","cwd":"/fixture/alpha","pid":1,"cols":80,"rows":24,"parked":false,"keepOpen":true,"command":["sh"]}],"clients":1}}"#)
                 default: break
                 }
                 send("{\"type\":\"reply\",\"id\":\"\(request.id)\"}")
@@ -220,8 +242,61 @@ struct WorkspaceNavigationTests {
         await exchange(WireRequest(method: "test.barrier"))
         precondition(!model.canOpenDirectory && model.directoryPath.isEmpty, "Deleted source context must reject a late result")
         precondition(peer.received.filter { $0.method == "window.new" }.count == 1)
+        // SwiftUI can retain the native view after the model removes its engine.
+        model.notice = nil
+        let removedEngine = model.engine(for: "right", host: "local")
+        let retainedEngine = model.engine(for: "left", host: "local")
+        Data("\u{1b}[?1004h".utf8).withUnsafeBytes {
+            il_terminal_feed(removedEngine.handle, $0.bindMemory(to: UInt8.self).baseAddress, $0.count)
+        }
+        removedEngine.focusChanged(true)
+        await exchange(WireRequest(method: "test.hold-close"))
+        model.closeBlock("right")
+        let preAckCount = peer.received.count
+        removedEngine.onResize?(81, 24, 8, 16)
+        removedEngine.focusChanged(false)
+        await exchange(WireRequest(method: "test.barrier"))
+        precondition(!peer.received.dropFirst(preAckCount).contains { $0.block == "right" && ["block.resize", "block.write"].contains($0.method) },
+                     "Closing panes must stop layout and focus input before the kill acknowledgment")
+        await exchange(WireRequest(method: "test.reject-close"))
+        precondition(model.notice == "Fixture close rejected", "A real close failure must remain visible")
+        model.notice = nil
+        let resumedCount = peer.received.count
+        removedEngine.onResize?(82, 24, 8, 16)
+        removedEngine.focusChanged(true)
+        await exchange(WireRequest(method: "test.barrier"))
+        let resumed = peer.received.dropFirst(resumedCount).filter { $0.block == "right" }.map(\.method)
+        precondition(resumed.contains("block.resize") && resumed.contains("block.write"), "A rejected close must restore pane input and resizing")
+        model.closeBlock("right")
+        await exchange(WireRequest(method: "test.drop-right"))
+        let requestCount = peer.received.count
+        removedEngine.onResize?(82, 25, 8, 16)
+        removedEngine.focusChanged(false)
+        await exchange(WireRequest(method: "test.barrier"))
+        await exchange(WireRequest(method: "test.publish-removal"))
+        await wait("Removed-pane state must arrive") { model.states["local"]?.revision == 999 }
+        removedEngine.onResize?(83, 26, 8, 16)
+        removedEngine.onInput?(Data("late input".utf8))
+        // SwiftUI may evaluate an outgoing TerminalPane again after its cached
+        // engine has been removed, before dismantling the old native view.
+        weak var outgoingEngine: TerminalEngine?
+        do {
+            let outgoing = model.engine(for: "right", host: "local")
+            outgoingEngine = outgoing
+            outgoing.onResize?(84, 27, 8, 16)
+            outgoing.onInput?(Data("outgoing view input".utf8))
+            outgoing.onReplayGap?()
+        }
+        model.focus("right")
+        await exchange(WireRequest(method: "test.barrier"))
+        let lateRequests = peer.received.dropFirst(requestCount).filter { $0.block == "right" }
+        precondition(lateRequests.isEmpty, "Removed native views still send stale requests: \(lateRequests.map(\.method))")
+        precondition(model.notice == nil && retainedEngine.onResize != nil && retainedEngine.onInput != nil,
+                     "Closing one pane must leave its sibling usable without a missing-terminal alert")
+        precondition(outgoingEngine == nil && model.focusedBlock == "left", "Outgoing views must not retain a deleted replica or reclaim terminal focus")
         model.close();await peer.finish()
         print("Workspace navigation: zoomed visible-pane commands, per-tab/session focus restoration, delayed/error/reordered directory replies and deleted contexts passed.")
+        print("Pane teardown: retained native-engine resize and focus-loss callbacks stop at block-close before coalesced state, and sibling callbacks remain connected.")
     }
 
     @MainActor
