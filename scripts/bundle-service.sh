@@ -1,6 +1,6 @@
 #!/bin/sh
 set -eu
-export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+export PATH="$PATH:/opt/homebrew/bin:/usr/local/bin"
 cd "$SRCROOT/service"
 export PKG_CONFIG_PATH="$SRCROOT/.build/ghostty/share/pkgconfig"
 export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-15.0}"

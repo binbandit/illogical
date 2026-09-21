@@ -2,6 +2,15 @@
 
 A native macOS terminal multiplexer built from the public Superlogical/Rex previews. The app uses SwiftUI and AppKit for its interface, Metal and Core Text for rendering, pinned Ghostty terminal state and input APIs, and a Go service that owns the terminal processes.
 
+## Download
+
+The [releases page](https://github.com/binbandit/illogical/releases) carries the builds the release workflow produces:
+
+- `illogical-VERSION-macos-arm64.dmg` for Apple Silicon Macs on macOS 15 or later. Open it and drag illogical to Applications. The CLI travels inside the bundle; link it with `ln -s /Applications/illogical.app/Contents/Resources/bin/illogical ~/.local/bin/illogical`.
+- `illogical-service-VERSION-linux-x86_64.tar.gz` and its `aarch64` counterpart for remote Linux hosts, glibc 2.34 or newer. These carry the service and CLI only: `sudo install -m755 bin/illogical /usr/local/bin/illogical`.
+
+Check a download against the release's `SHA256SUMS`. A release built without a Developer ID certificate is ad-hoc signed and not notarized, so macOS refuses it until the download quarantine is cleared with `xattr -dr com.apple.quarantine /Applications/illogical.app`. See [releases](docs/releases.md) for the workflow, the optional signing secrets, and how to produce the same archives locally.
+
 ## Build
 
 Apple Silicon, macOS 15 or later, Xcode with the Metal toolchain, Go 1.27.1 or later, and `pkg-config` are required. The initial bootstrap downloads the pinned Ghostty source and Zig compiler, then builds the terminal library.
@@ -12,6 +21,8 @@ CONFIGURATION=Release ./scripts/build.sh
 ```
 
 The app is produced at `.build/xcode/Build/Products/Release/illogical.app`. Its CLI is bundled at `Contents/Resources/bin/illogical`. Release builds should be used for performance comparisons.
+
+The same bootstrap runs on x86_64 and aarch64 Linux, where it builds the terminal library for the service and CLI alone; `./scripts/package-linux.sh` writes the distributable archive for a remote host.
 
 ## Install
 

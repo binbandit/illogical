@@ -6,6 +6,10 @@ nonisolated struct JSONLineFramer {
     let maximumMessageSize: Int
     private var partial = Data()
 
+    // Swift 6.3 gives the memberwise initializer the private buffer's access
+    // level, so the explicit one keeps the framer usable across the module.
+    init(maximumMessageSize: Int) { self.maximumMessageSize = maximumMessageSize }
+
     mutating func append(_ data: Data) throws -> [Data] {
         var lines: [Data] = []
         try data.withUnsafeBytes { bytes in

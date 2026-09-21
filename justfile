@@ -17,3 +17,8 @@ dev:
 # Install the Release app and CLI without interrupting terminal processes.
 install:
     ./scripts/install.sh
+
+# Build the Release app and write the downloadable archives to .build/release.
+package:
+    CONFIGURATION=Release ./scripts/build.sh
+    ./scripts/package-macos.sh
