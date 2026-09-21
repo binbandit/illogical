@@ -86,7 +86,7 @@ func (s *Server) newBlock(r Request, id string) (*Block, error) {
 	if rows == 0 {
 		rows = 30
 	}
-	b := &Block{server: s, lastOutput: time.Now(), snapshotPath: filepath.Join(s.directory, "snapshots", id+".gz"), info: BlockInfo{ID: id, Title: filepath.Base(command[0]), Cwd: cwd, Cols: cols, Rows: rows, Command: command, KeepOpen: r.KeepOpen}}
+	b := &Block{server: s, lastOutput: time.Now(), snapshotPath: filepath.Join(s.directory, "snapshots", id+".gz"), info: BlockInfo{ID: id, Session: r.Session, Window: r.Window, Title: filepath.Base(command[0]), Cwd: cwd, Cols: cols, Rows: rows, Command: command, KeepOpen: r.KeepOpen}}
 	b.replay.epoch = NewID()
 	b.info.Label = r.Label
 	b.info.Flavor = "terminal"
@@ -142,8 +142,8 @@ func (s *Server) newBlock(r Request, id string) (*Block, error) {
 		}
 		b.mu.Lock()
 		b.info.ExitCode = &code
+		b.event(Message{Event: "child_exited", ExitCode: &code})
 		b.mu.Unlock()
-		s.broadcast(Message{Type: "event", Event: "child_exited", Block: id, ExitCode: &code}, "")
 		s.changed()
 		if !r.KeepOpen {
 			select {
@@ -154,6 +154,14 @@ func (s *Server) newBlock(r Request, id string) (*Block, error) {
 	}()
 	s.parkingChanged()
 	return b, nil
+}
+
+// Call with b.mu held. Routing is captured when the event occurs, independently
+// of coalesced workspace updates and subsequent moves or removal.
+func (b *Block) event(m Message) {
+	m.Type, m.Block = "event", b.info.ID
+	m.Session, m.Window = b.info.Session, b.info.Window
+	b.server.broadcastEvent(m)
 }
 
 func cleanEnvironment(env []string) []string {
@@ -181,7 +189,7 @@ func (b *Block) installEffects() {
 		// pasted user input and combine replies from each parsed output chunk.
 		if len(b.replies)+len(data) > 1<<20 {
 			if !b.replyOverflow {
-				b.server.broadcast(Message{Type: "event", Event: "error", Block: b.info.ID, Text: "Terminal query reply limit exceeded: the process is not reading its replies"}, "")
+				b.event(Message{Event: "error", Text: "Terminal query reply limit exceeded: the process is not reading its replies"})
 				b.replyOverflow = true
 			}
 			return
@@ -195,26 +203,26 @@ func (b *Block) installEffects() {
 	t.SetEffectTitleChanged(func(t *vt.Terminal) {
 		b.info.Title, _ = t.Title()
 		b.server.changed()
-		b.server.broadcast(Message{Type: "event", Event: "title_changed", Block: b.info.ID, Text: b.info.Title}, "")
+		b.event(Message{Event: "title_changed", Text: b.info.Title})
 	})
 	t.SetEffectPwdChanged(func(t *vt.Terminal) {
 		if cwd, err := t.Pwd(); err == nil && cwd != "" {
 			b.info.Cwd = normalizeDirectory(cwd)
-			b.server.broadcast(Message{Type: "event", Event: "pwd_changed", Block: b.info.ID, Text: b.info.Cwd}, "")
+			b.event(Message{Event: "pwd_changed", Text: b.info.Cwd})
 			b.server.changed()
 		}
 	})
 	t.SetEffectProgressReport(func(_ *vt.Terminal, report vt.TerminalProgressReport) {
-		b.server.broadcast(Message{Type: "event", Event: "progress_report", Block: b.info.ID, Text: fmt.Sprintf("%d:%d", report.State, report.Progress)}, "")
+		b.event(Message{Event: "progress_report", Text: fmt.Sprintf("%d:%d", report.State, report.Progress)})
 	})
-	t.SetEffectBell(func(_ *vt.Terminal) { b.server.broadcast(Message{Type: "event", Event: "bell", Block: b.info.ID}, "") })
+	t.SetEffectBell(func(_ *vt.Terminal) { b.event(Message{Event: "bell"}) })
 	t.SetEffectDesktopNotification(func(_ *vt.Terminal, n vt.TerminalDesktopNotification) {
-		b.server.broadcast(Message{Type: "event", Event: "desktop_notification", Block: b.info.ID, Text: n.Title + "\n" + n.Body}, "")
+		b.event(Message{Event: "desktop_notification", Text: n.Title + "\n" + n.Body})
 	})
 	t.SetEffectClipboardWrite(func(_ *vt.Terminal, w vt.ClipboardWrite) vt.ClipboardWriteReply {
 		for _, content := range w.Contents {
 			if content.MIME == "text/plain" {
-				b.server.broadcastEvent(Message{Type: "event", Event: "clipboard_written", Block: b.info.ID, Data: content.Data})
+				b.event(Message{Event: "clipboard_written", Data: content.Data})
 			}
 		}
 		return vt.ClipboardWriteReply{Result: vt.ClipboardWriteSuccess}
@@ -305,8 +313,8 @@ func (b *Block) readLoop() {
 				return
 			}
 			if err := b.wake(); err != nil {
+				b.event(Message{Event: "error", Text: err.Error()})
 				b.mu.Unlock()
-				b.server.broadcast(Message{Type: "event", Event: "error", Block: b.info.ID, Text: err.Error()}, "")
 				return
 			}
 			b.lastOutput = time.Now()

@@ -172,7 +172,7 @@ func (b *Block) refreshGraphics() {
 			zero, limit := uint64(0), uint64(maxGraphicsBytes)
 			_ = b.terminal.SetKittyImageStorageLimit(&zero)
 			_ = b.terminal.SetKittyImageStorageLimit(&limit)
-			b.server.broadcastEvent(Message{Type: "event", Event: "error", Block: b.info.ID, Text: "Terminal image placement limit exceeded; images cleared"})
+			b.event(Message{Event: "error", Text: "Terminal image placement limit exceeded; images cleared"})
 			scene.Images = []GraphicsImage{}
 			scene.Placements = []GraphicsPlacement{}
 			clear(images)

@@ -584,6 +584,9 @@ func run() error {
 		return err
 	}
 	if command == "events" {
+		if session := findStateSession(m.State, r.Session); session != nil {
+			r.Session = session.ID
+		}
 		encoder := json.NewEncoder(os.Stdout)
 		for {
 			event, err := c.next()

@@ -36,7 +36,7 @@ func (b *Block) resizeFor(client string, size DesiredSize) error {
 	if b.graphics.retained {
 		b.refreshGraphics()
 	}
-	b.server.broadcast(Message{Type: "event", Event: "size_changed", Block: b.info.ID, Cols: size.Cols, Rows: size.Rows}, "")
+	b.event(Message{Event: "size_changed", Cols: size.Cols, Rows: size.Rows})
 	b.server.changed()
 	return nil
 }

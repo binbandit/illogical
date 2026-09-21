@@ -475,7 +475,11 @@ func (s *Server) restore() error {
 	for _, info := range state.Blocks {
 		// A service restart recreates a shell at its saved location. Process
 		// survival is guaranteed across client detach, not host/service death.
-		b, err := s.newBlock(Request{Cwd: info.Cwd, Cols: info.Cols, Rows: info.Rows, KeepOpen: true}, info.ID)
+		r := Request{Cwd: info.Cwd, Cols: info.Cols, Rows: info.Rows, KeepOpen: true}
+		if ss, w := s.findWindow(info.ID); w != nil {
+			r.Session, r.Window = ss.ID, w.ID
+		}
+		b, err := s.newBlock(r, info.ID)
 		if err != nil {
 			for _, ss := range s.sessions {
 				for _, w := range ss.Windows {
@@ -496,7 +500,12 @@ func (s *Server) restore() error {
 
 func (s *Server) findSession(id string) *Session {
 	for _, ss := range s.sessions {
-		if ss.ID == id || ss.Name == id {
+		if ss.ID == id {
+			return ss
+		}
+	}
+	for _, ss := range s.sessions {
+		if ss.Name == id {
 			return ss
 		}
 	}
@@ -517,6 +526,11 @@ func (s *Server) findWindow(id string) (*Session, *Window) {
 }
 
 func (s *Server) removeBlockLocked(id string) {
+	ss, window := s.findWindow(id)
+	event := Message{Type: "event", Event: "block_closed", Block: id}
+	if window != nil {
+		event.Session, event.Window = ss.ID, window.ID
+	}
 	for _, ss := range s.sessions {
 		for _, w := range ss.Windows {
 			w.Root = w.Root.remove(id)
@@ -527,11 +541,14 @@ func (s *Server) removeBlockLocked(id string) {
 	}
 	if b := s.blocks[id]; b != nil {
 		b.close()
+		if err := os.Remove(b.snapshotPath); err != nil && !os.IsNotExist(err) {
+			log.Printf("remove snapshot %s: %v", id, err)
+		}
 		delete(s.blocks, id)
 		s.parkingChanged()
 	}
 	s.pruneLocked()
-	s.broadcast(Message{Type: "event", Event: "block_closed", Block: id}, "")
+	s.broadcastEvent(event)
 }
 
 func (s *Server) pruneLocked() {
@@ -627,10 +644,6 @@ func (s *Server) handle(c *client, r Request) Message {
 		if r.Method == "window.new" && ss == nil {
 			return fail(errors.New("session not found"))
 		}
-		b, err := s.newBlock(r, "")
-		if err != nil {
-			return fail(err)
-		}
 		if r.Method == "session.new" {
 			name := strings.TrimSpace(r.Label)
 			if name == "" {
@@ -641,10 +654,18 @@ func (s *Server) handle(c *client, r Request) Message {
 				}
 			}
 			ss = &Session{ID: NewID(), Name: name, Windows: []*Window{}}
+		}
+		w := &Window{ID: NewID(), Name: ""}
+		r.Session, r.Window = ss.ID, w.ID
+		b, err := s.newBlock(r, "")
+		if err != nil {
+			return fail(err)
+		}
+		if r.Method == "session.new" {
 			s.sessions = append(s.sessions, ss)
 		}
 		s.blocks[b.info.ID] = b
-		w := &Window{ID: NewID(), Name: "", Root: leaf(b.info.ID), FocusedBlock: b.info.ID}
+		w.Root, w.FocusedBlock = leaf(b.info.ID), b.info.ID
 		ss.FocusedWindow = w.ID
 		b.mu.Lock()
 		b.info.Creator = c.id
@@ -757,6 +778,7 @@ func (s *Server) handle(c *client, r Request) Message {
 			r.Cwd = b.currentDirectory()
 			b.mu.Unlock()
 		}
+		r.Session, r.Window = ss.ID, w.ID
 		newBlock, err := s.newBlock(r, "")
 		if err != nil {
 			return fail(err)
@@ -775,26 +797,49 @@ func (s *Server) handle(c *client, r Request) Message {
 		return Message{Block: newBlock.info.ID, Window: w.ID, Session: ss.ID}
 	}
 	if r.Method == "block.move" || r.Method == "block.swap" {
+		if s.blocks[r.Target] == nil {
+			return fail(errors.New("destination terminal block not found"))
+		}
 		if r.Block == r.Target {
 			return Message{}
 		}
-		_, source := s.findWindow(r.Block)
+		sourceSession, source := s.findWindow(r.Block)
 		ss, target := s.findWindow(r.Target)
-		if source == nil || target == nil {
+		if source == nil || target == nil || !source.Root.contains(r.Block) || !target.Root.contains(r.Target) {
 			return fail(errors.New("source or destination is not placed"))
 		}
+		// Work on copies so even a failed insertion cannot strand a live process.
+		sourceRoot, targetRoot := source.Root.clone(), target.Root.clone()
+		if source == target {
+			targetRoot = sourceRoot
+		}
 		if r.Method == "block.swap" {
-			source.Root.replace(r.Block, "__moving__")
-			target.Root.replace(r.Target, r.Block)
-			source.Root.replace("__moving__", r.Target)
+			placeholder := NewID()
+			sourceRoot.replace(r.Block, placeholder)
+			targetRoot.replace(r.Target, r.Block)
+			sourceRoot.replace(placeholder, r.Target)
 		} else {
-			source.Root = source.Root.remove(r.Block)
+			sourceRoot = sourceRoot.remove(r.Block)
+			if source == target {
+				targetRoot = sourceRoot
+			}
 			axis := "horizontal"
 			if r.Axis == "vertical" {
 				axis = "vertical"
 			}
-			target.Root.insert(r.Target, r.Block, axis)
-			s.pruneLocked()
+			if !targetRoot.insert(r.Target, r.Block, axis) {
+				return fail(errors.New("destination terminal is not placed"))
+			}
+		}
+		source.Root, target.Root = sourceRoot, targetRoot
+		b.mu.Lock()
+		b.info.Session, b.info.Window = ss.ID, target.ID
+		b.mu.Unlock()
+		if r.Method == "block.swap" {
+			other := s.blocks[r.Target]
+			other.mu.Lock()
+			other.info.Session, other.info.Window = sourceSession.ID, source.ID
+			other.mu.Unlock()
 		}
 		s.pruneLocked()
 		source.Zoomed = ""
@@ -904,7 +949,7 @@ func (s *Server) handle(c *client, r Request) Message {
 		if r.Label != "selection_copied" && r.Label != "url_clicked" {
 			return fail(errors.New("unsupported client event"))
 		}
-		s.broadcast(Message{Type: "event", Event: r.Label, Block: r.Block, Text: string(r.Data)}, "")
+		b.event(Message{Event: r.Label, Text: string(r.Data)})
 		return Message{}
 	case "block.inspect":
 		info := b.info

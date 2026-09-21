@@ -28,11 +28,20 @@ func eventMatches(r mux.Request, m mux.Message, state *mux.State) bool {
 	if r.Window == "" && r.Session == "" {
 		return true
 	}
+	if m.Session != "" && m.Window != "" {
+		session := r.Session
+		if resolved := findStateSession(state, session); resolved != nil {
+			session = resolved.ID
+		}
+		return (session == "" || session == m.Session) && (r.Window == "" || r.Window == m.Window)
+	}
+	// Older services omit event routing. Retain their state-based behavior.
 	if state == nil {
 		return false
 	}
+	selected := findStateSession(state, r.Session)
 	for _, ss := range state.Sessions {
-		if r.Session != "" && r.Session != ss.ID && r.Session != ss.Name {
+		if r.Session != "" && ss != selected {
 			continue
 		}
 		for _, w := range ss.Windows {
@@ -47,6 +56,23 @@ func eventMatches(r mux.Request, m mux.Message, state *mux.State) bool {
 		}
 	}
 	return false
+}
+
+func findStateSession(state *mux.State, value string) *mux.Session {
+	if state == nil || value == "" {
+		return nil
+	}
+	for _, session := range state.Sessions {
+		if session.ID == value {
+			return session
+		}
+	}
+	for _, session := range state.Sessions {
+		if session.Name == value {
+			return session
+		}
+	}
+	return nil
 }
 
 // A window/session wait observes the children placed there when the atomic
@@ -64,8 +90,9 @@ func waitForResource(c *connection, r mux.Request) error {
 	}
 	ids := []string{}
 	found := false
+	selected := findStateSession(m.State, r.Session)
 	for _, ss := range m.State.Sessions {
-		if r.Session != "" && ss.ID != r.Session && ss.Name != r.Session {
+		if r.Session != "" && ss != selected {
 			continue
 		}
 		if r.Window == "" {
