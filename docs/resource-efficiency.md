@@ -116,3 +116,16 @@ Battery comparison requires a separate repeatable run on battery with fixed brig
 Run [scripts/test-resource-efficiency.sh](../scripts/test-resource-efficiency.sh). It builds the counter utility and actual socket retry/workspace fixtures against production sources. The test preferences are isolated under `dev.illogical.resource-tests`; sockets are unique `/tmp/ilg-resource-*` paths. Before changes, the retry test failed at the repeated two-second delay and the model test failed because the removed host's engine remained alive. After changes, the focused tests verify exponential delay, cap/jitter policy, successful-greeting reset, explicit retry, close cancellation, host/block cleanup and preservation of another host's engine.
 
 The existing [connection suite](../scripts/test-connection.sh) remains required because backoff must not break small server-first greetings, ordered/bounded delivery, stale-callback cancellation, or the local helper-to-socket handoff and exactly-once early-request fallback. Local results are recorded in `.build/resource-efficiency/focused-tests.txt` and `connection-tests.txt`.
+
+## Installed feature build, 21 September 2026
+
+The installed Release executable and its private QA copy are identified by the hashes in [performance validation](performance.md#installed-release-sample-21-september-2026). The Mac was on battery power. One visible, focused idle shell was measured over 20 seconds, with no concurrent build or test suite:
+
+| Process | Interval | CPU time | One-core CPU | Interrupt / package-idle wakeups | Stable footprint | Writes |
+| --- | --- | --- | --- | --- | --- | --- |
+| Native client | 20.000356 s | 0.405958 ms | 0.002030% | 7 / 0 | 95.96 MB | 0 bytes |
+| Service | 20.005048 s | 0 recorded delta | 0 recorded delta | 0 / 0 | 7.59 MB | 0 bytes |
+
+Local evidence: `.build/resource-efficiency/final-visible-client.json` and `final-visible-service.json`. Footprints did not grow during either interval. These measurements exclude the shell and unrelated processes. Zero counter increments do not mean zero energy consumption, and this short sample does not measure laptop battery runtime.
+
+The same build subsequently sustained 432.35 producer FPS during a 60.18-second visible DOOM run without reconnecting. The earlier frozen build's higher AC-powered number and a later lower battery sample have different conditions; they do not establish a feature-related throughput change. A matched Ghostty run and controlled whole-device energy comparison remain outstanding.

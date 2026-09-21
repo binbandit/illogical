@@ -33,6 +33,8 @@ The service keeps sessions, tabs, recursive split layouts, shell processes, and 
 
 The native client supports horizontal and vertical navigation, pane movement and resizing, zoom, session and command pickers, a remote directory picker, independent floating searches in each pane, live tab previews, session overview, paired light/dark themes, and Ghostty theme import. Rendering includes Nerd Font fallback, colour emoji, exact block graphics, selection, links, terminal mouse reporting, and bounded static Kitty images. Copy-on-selection and synchronized scrolling are optional. Public previews establish the reference, but this is an independent implementation and exact feature and visual parity remains under validation.
 
+Rename a session from the pencil beside its name in the session picker (Command-K), or choose **Workspace > Rename Session**. Renaming a different session leaves your current terminal selected; names are saved with the workspace.
+
 Useful shortcuts:
 
 | Action | Shortcut |

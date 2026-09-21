@@ -71,6 +71,7 @@ final class WorkspaceModel: ObservableObject {
     private var processLookups: [String: Task<Void, Never>] = [:]
     private var processVersions: [String: String] = [:]
     private var pendingBlock: String?
+    private var renameContext: (host: String, session: String, window: String?)?
     var onLaunchStage: ((String) -> Void)?
     var onRequestActivation: (() -> Void)?
 
@@ -326,10 +327,35 @@ final class WorkspaceModel: ObservableObject {
     func move(_ block:String,to target:String,axis:String){send(WireRequest(method:"block.move",block:block,target:target,axis:axis)){[weak self] in self?.created($0,host:self?.selectedHost ?? "local")}}
     func resizeSplit(_ id:String,ratio:Double,deck:String){send(WireRequest(method:"layout.resize",window:deck,target:id,ratio:ratio))}
 
-    func rename(_ target:String){renameTarget=target;renameValue=target=="session" ? activeSession?.name ?? "" : activeDeck.map{deckTitle($0)} ?? "";showRename=true}
-    func finishRename(){
-        let name=renameValue.trimmingCharacters(in:.whitespacesAndNewlines);guard !name.isEmpty else{return}
-        send(WireRequest(method:renameTarget+".rename",session:selectedSession,window:selectedDeck,label:name));showRename=false
+    func rename(_ target: String) {
+        if target == "session" { rename(session: selectedSession, host: selectedHost); return }
+        guard target == "window", let deck = activeDeck else { return }
+        renameContext = (selectedHost, selectedSession, deck.id)
+        renameTarget = "window";renameValue = deckTitle(deck);palette = nil;showRename = true
+    }
+
+    func rename(session: String, host: String) {
+        guard let session = states[host]?.sessions.first(where: { $0.id == session }) else { return }
+        renameContext = (host, session.id, nil)
+        renameTarget = "session";renameValue = session.name;palette = nil;showRename = true
+    }
+
+    var canRename: Bool { !renameValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+
+    func cancelRename() {
+        showRename = false;renameContext = nil;focusToken = UUID()
+    }
+
+    func finishRename() {
+        let name = renameValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, let context = renameContext else { return }
+        guard let session = states[context.host]?.sessions.first(where: { $0.id == context.session }),
+              context.window == nil || session.windows.contains(where: { $0.id == context.window }) else {
+            notice = context.window == nil ? "This session is no longer available." : "This tab is no longer available."
+            cancelRename();return
+        }
+        send(WireRequest(method: context.window == nil ? "session.rename" : "window.rename", session: context.session, window: context.window, label: name), host: context.host)
+        cancelRename()
     }
     func find() {
         guard !focusedBlock.isEmpty else { return }

@@ -658,10 +658,11 @@ func (s *Server) handle(c *client, r Request) Message {
 			return fail(errors.New("session not found"))
 		}
 		if r.Method == "session.rename" {
-			if strings.TrimSpace(r.Label) == "" {
+			name := strings.TrimSpace(r.Label)
+			if name == "" {
 				return fail(errors.New("name cannot be empty"))
 			}
-			ss.Name = r.Label
+			ss.Name = name
 		} else {
 			var ids []string
 			for _, w := range ss.Windows {

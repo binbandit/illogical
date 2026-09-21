@@ -199,7 +199,7 @@ struct WorkspaceSidebar: View {
                                         ForEach(session.windows) { deck in DeckTab(model: model, deck: deck, session: session.id, host: host.id, vertical: true) }
                                     }
                                     .contextMenu {
-                                        Button("Rename Session…") { model.choose(session: session.id, host: host.id); model.rename("session") }
+                                        Button("Rename Session…") { model.rename(session: session.id, host: host.id) }
                                         Button("Close Session") { model.killSession(session.id, host: host.id) }
                                     }
                                 }

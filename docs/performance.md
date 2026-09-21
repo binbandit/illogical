@@ -55,6 +55,16 @@ The warm median was 493.660 ms. These are process-start-to-presentation measurem
 
 After adding the cold-start socket handoff and initial keyboard-focus fix, another foreground service-start launch measured 711.217 ms. A real first Control-C stopped an existing `sleep` without a prior click; picker input and focus restoration after dismissing the picker were also verified.
 
+## Installed Release sample, 21 September 2026
+
+`just install` built and installed the signed Release bundle. A private QA copy used the identical native executable (`8378423c14470f9a1dc1f85589c7ebba5a7b00ed58297b001d250c807160ab04`) and service (`d750be50d0bfb05ddac710db19a85f31f05d7bd24cdefba40e14fc1a5860dd37`), with only its bundle identity and service directory changed for isolation. This build includes static images, contextual shaping, theme import, bounded replay and the corrected translucent renderer. The hashes identify this measured snapshot; the subsequent session-picker rename and incremental-signing changes were validated separately, without repeating the throughput benchmark.
+
+On battery power, the unchanged DOOM executable at 134x35 with SF Mono 13 pt sustained **432.35 producer FPS over 60.18 seconds**. The same viewer remained attached throughout, no output queue overflow occurred, and CLI-injected Control-C returned shell metadata in 64.37 ms. Native inspection confirmed live fire rendering and the restored prompt. No builds or tests ran during this measurement. Local evidence: `.build/doom-final-result.json`.
+
+A subsequent battery run of the frozen resource-only build sustained 344.11 FPS over 60.22 seconds, with continuous ownership, no overflow and 115.18 ms interruption. Its cumulative rate fell from 422.91 FPS at ten seconds. This was a single later sample with uncontrolled background activity and thermal history, not a randomized comparison. The frozen build's earlier AC-powered 587.04 FPS result therefore cannot establish a regression in the new feature build, nor can these battery samples establish a speedup. Local evidence: `.build/doom-frozen-battery-result.json`.
+
+The first launch of the freshly signed QA copy, starting its private service, took **1,312.416 ms** from process creation to terminal presentation. App initialization began at 803.3 ms, content appeared at 1,030.761 ms and the snapshot arrived at 1,273.976 ms. Keep this slower sample alongside the earlier warm measurements. It is not a controlled cold-OS-cache test. Consistent half-bounce startup and zero overhead versus Ghostty remain unverified.
+
 ## Correctness under load
 
 The test suite checks byte-exact ordered output, bounded queues, cancellation, snapshot/history barriers, and stalled-client isolation. A parked terminal must retain an unfinished escape sequence after waking, or reconnecting during fast output can fail. A regression exercises that exact case, and the actual DOOM executable was also used for repeated attachments after parking.

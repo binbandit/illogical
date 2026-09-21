@@ -13,6 +13,7 @@ struct PaletteOverlay: View {
         var detail = ""
         var icon = "terminal"
         var theme: TerminalTheme?
+        var rename: (() -> Void)?
         let action: () -> Void
     }
 
@@ -22,7 +23,7 @@ struct PaletteOverlay: View {
         case .sessions:
             all = model.hosts.flatMap { host in
                 (model.states[host.id]?.sessions ?? []).map { session in
-                    Item(id: session.id, title: session.name, detail: "\(host.name) · \(session.windows.count) tabs", icon: "square.stack.3d.up", action: { model.choose(session: session.id, host: host.id) })
+                    Item(id: "\(host.id):\(session.id)", title: session.name, detail: "\(host.name) · \(session.windows.count) tabs", icon: "square.stack.3d.up", rename: { model.rename(session: session.id, host: host.id) }, action: { model.choose(session: session.id, host: host.id) })
                 }
             }
         case .themes:
@@ -80,19 +81,29 @@ struct PaletteOverlay: View {
                     ScrollView {
                         LazyVStack(spacing: 3) {
                             ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
-                                Button { selected = index; activate() } label: {
-                                    HStack(spacing: 12) {
-                                        if let theme = item.theme {
-                                            RoundedRectangle(cornerRadius: 5).fill(theme.color).frame(width: 25, height: 25)
-                                                .overlay(Text("Aa").font(.system(size: 9, design: .monospaced)).foregroundStyle(theme.text))
-                                                .overlay(RoundedRectangle(cornerRadius: 5).stroke(.primary.opacity(0.15), lineWidth: 0.5))
-                                        } else { Image(systemName: item.icon).frame(width: 25).opacity(0.6) }
-                                        Text(item.title).font(.system(size: 12)).lineLimit(1)
-                                        Spacer()
-                                        if mode != .sessions || model.hosts.count > 1 { Text(item.detail).font(.system(size: 10)).opacity(0.4).lineLimit(1) }
-                                        if mode == .themes && model.themeName == item.title { Image(systemName: "checkmark").font(.system(size: 10)) }
-                                    }.padding(.horizontal, 9).frame(height: 29).contentShape(Rectangle())
-                                }.buttonStyle(.plain).foregroundStyle(selected == index ? Color.white : model.theme.text).background(selected == index ? Color.accentColor : .clear, in: RoundedRectangle(cornerRadius: 6)).id(index)
+                                HStack(spacing: 0) {
+                                    Button { selected = index; activate() } label: {
+                                        HStack(spacing: 12) {
+                                            if let theme = item.theme {
+                                                RoundedRectangle(cornerRadius: 5).fill(theme.color).frame(width: 25, height: 25)
+                                                    .overlay(Text("Aa").font(.system(size: 9, design: .monospaced)).foregroundStyle(theme.text))
+                                                    .overlay(RoundedRectangle(cornerRadius: 5).stroke(.primary.opacity(0.15), lineWidth: 0.5))
+                                            } else { Image(systemName: item.icon).frame(width: 25).opacity(0.6) }
+                                            Text(item.title).font(.system(size: 12)).lineLimit(1)
+                                            Spacer()
+                                            if mode != .sessions || model.hosts.count > 1 { Text(item.detail).font(.system(size: 10)).opacity(0.4).lineLimit(1) }
+                                            if mode == .themes && model.themeName == item.title { Image(systemName: "checkmark").font(.system(size: 10)) }
+                                        }.padding(.horizontal, 9).frame(height: 29).contentShape(Rectangle())
+                                    }.buttonStyle(.plain)
+                                    if let rename = item.rename {
+                                        Button(action: rename) {
+                                            Image(systemName: "pencil").font(.system(size: 11)).opacity(0.7)
+                                                .frame(width: 28, height: 29).contentShape(Rectangle())
+                                        }.buttonStyle(.plain).help("Rename Session…").accessibilityLabel("Rename \(item.title)")
+                                    }
+                                }.foregroundStyle(selected == index ? Color.white : model.theme.text)
+                                    .background(selected == index ? Color.accentColor : .clear, in: RoundedRectangle(cornerRadius: 6))
+                                    .contextMenu { if let rename = item.rename { Button("Rename Session…", action: rename) } }.id(index)
                             }
                             if items.isEmpty { Text("No results").font(.system(size: 12)).opacity(0.45).padding(24) }
                         }.padding(7)

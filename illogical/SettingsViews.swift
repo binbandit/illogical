@@ -88,7 +88,7 @@ struct RenameSheet: View {
         VStack(alignment: .leading, spacing: 18) {
             Text(model.renameTarget == "session" ? "Rename Session" : "Rename Tab").font(.headline)
             TextField("Name", text: $model.renameValue).focused($focused).onSubmit { model.finishRename() }
-            HStack { Spacer(); Button("Cancel") { model.showRename = false }.keyboardShortcut(.cancelAction); Button("Rename") { model.finishRename() }.keyboardShortcut(.defaultAction) }
+            HStack { Spacer(); Button("Cancel") { model.cancelRename() }.keyboardShortcut(.cancelAction); Button("Rename") { model.finishRename() }.keyboardShortcut(.defaultAction).disabled(!model.canRename) }
         }.padding(24).frame(width: 360).onAppear { focused = true }
     }
 }
