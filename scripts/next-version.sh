@@ -1,13 +1,15 @@
 #!/bin/sh
 # Print the next release version from the Conventional Commits since the last
-# v* tag, or nothing when none of them warrants a release. A "!" after the type
+# stable vMAJOR.MINOR.PATCH tag, or nothing when none warrants a release. A "!" after the type
 # or a BREAKING CHANGE footer bumps the major version, feat bumps the minor
 # version, and fix, perf, and revert bump the patch version.
 set -eu
 cd "${1:-.}"
-LAST=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)
+# A published tag can leave HEAD's ancestry after a rebase or force push.
+# Keep its version reserved instead of starting over from 0.0.0.
+LAST=$(git tag --list --sort=-version:refname | sed -n '/^v[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*$/p' | head -n 1)
 if [ -n "$LAST" ]; then RANGE="$LAST..HEAD"; else RANGE=HEAD; fi
-BASE=${LAST#v}; BASE=${BASE%%-*}; BASE=${BASE:-0.0.0}
+BASE=${LAST#v}; BASE=${BASE:-0.0.0}
 # 3 major, 2 minor, 1 patch, 0 none; a commit can only raise the level.
 BUMP=0
 for COMMIT in $(git rev-list "$RANGE"); do

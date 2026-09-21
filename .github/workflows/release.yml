@@ -27,6 +27,7 @@ on:
       - scripts/build.sh
       - scripts/bundle-service.sh
       - scripts/next-version.sh
+      - scripts/test-next-version.sh
       - scripts/package-linux.sh
       - scripts/package-macos.sh
 
@@ -52,6 +53,8 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+      - name: Test release version selection
+        run: sh scripts/test-next-version.sh
       - id: derive
         env:
           INPUT_VERSION: ${{ inputs.version }}

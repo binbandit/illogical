@@ -23,8 +23,8 @@ helper, which the flake's `login-helper` package and the NixOS module install.
 ## Cutting a release
 
 Merging to `main` releases automatically. `scripts/next-version.sh` reads the
-[Conventional Commits](https://www.conventionalcommits.org/) since the last `v*`
-tag and picks the bump:
+[Conventional Commits](https://www.conventionalcommits.org/) since the highest
+stable `vMAJOR.MINOR.PATCH` tag and picks the bump:
 
 | Commits since the last tag | Bump | Example |
 | --- | --- | --- |
@@ -41,6 +41,13 @@ skipped and the push costs a few seconds. Runs on `main` queue rather than
 cancel each other, so each one sees the tag the previous one created. Squash
 merges take their subject from the pull request title, so word the title as
 the commit you want analyzed.
+
+Version selection considers all stable release tags, including tags left outside
+`main`'s ancestry by a history rewrite, so it does not reuse a published version.
+Commits reachable from that tag are excluded from the bump calculation;
+rewritten commits with new IDs can be counted again. Prerelease and other
+non-stable tags are ignored. Run `sh scripts/test-next-version.sh` to check the
+version rules; the workflow also runs these checks before selecting a version.
 
 Pushing a tag by hand (`git tag v0.2.0 && git push origin v0.2.0`) releases
 exactly that version the same way, for a release the commit messages would not
