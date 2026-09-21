@@ -1,9 +1,12 @@
 name: Release
 
-# Builds the downloadable macOS app and the Linux service archives. Tags publish
-# a draft release; manual runs and packaging changes only upload build artifacts.
+# Builds the downloadable macOS app and the Linux service archives. Pushes to
+# main release automatically when the Conventional Commits since the last tag
+# call for a version bump; tags release that version; manual runs and packaging
+# changes only upload build artifacts.
 on:
   push:
+    branches: [main]
     tags: ['v*']
   workflow_dispatch:
     inputs:
@@ -23,15 +26,17 @@ on:
       - scripts/bootstrap.sh
       - scripts/build.sh
       - scripts/bundle-service.sh
+      - scripts/next-version.sh
       - scripts/package-linux.sh
       - scripts/package-macos.sh
 
 permissions:
   contents: read
 
+# Releases from main must finish in order so each one sees the previous tag.
 concurrency:
   group: release-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   version:
@@ -39,35 +44,56 @@ jobs:
     outputs:
       version: ${{ steps.derive.outputs.version }}
       short: ${{ steps.derive.outputs.short }}
+      build: ${{ steps.derive.outputs.build }}
       publish: ${{ steps.derive.outputs.publish }}
+      draft: ${{ steps.derive.outputs.draft }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          fetch-tags: true
       - id: derive
         env:
           INPUT_VERSION: ${{ inputs.version }}
           INPUT_PUBLISH: ${{ inputs.publish }}
         run: |
           set -eu
+          BUILD=true
+          PUBLISH=false
+          DRAFT=false
           if [ "$GITHUB_REF_TYPE" = tag ]; then
               VERSION=${GITHUB_REF_NAME#v}
               PUBLISH=true
-          elif [ -n "$INPUT_VERSION" ]; then
-              VERSION=${INPUT_VERSION#v}
+          elif [ "$GITHUB_EVENT_NAME" = push ]; then
+              VERSION=$(./scripts/next-version.sh)
+              if [ -n "$VERSION" ]; then
+                  PUBLISH=true
+                  echo "Releasing v$VERSION from the commits since the last tag."
+              else
+                  BUILD=false
+                  echo 'No feat, fix, perf, revert, or breaking commit since the last tag; nothing to release.'
+              fi
+          elif [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+              VERSION=${INPUT_VERSION:-0.0.0-$(git rev-parse --short HEAD)}
+              VERSION=${VERSION#v}
               PUBLISH=${INPUT_PUBLISH:-false}
+              DRAFT=true
           else
               VERSION=0.0.0-$(git rev-parse --short HEAD)
-              PUBLISH=false
           fi
           # CFBundleShortVersionString only accepts a dotted number.
           SHORT=$(printf '%s' "$VERSION" | sed -n 's/^\([0-9][0-9.]*[0-9]\).*/\1/p')
           {
               echo "version=$VERSION"
               echo "short=${SHORT:-0.0.0}"
+              echo "build=$BUILD"
               echo "publish=$PUBLISH"
+              echo "draft=$DRAFT"
           } >> "$GITHUB_OUTPUT"
 
   macos:
     needs: version
+    if: needs.version.outputs.build == 'true'
     runs-on: macos-26
     env:
       ILLOGICAL_VERSION: ${{ needs.version.outputs.version }}
@@ -128,6 +154,7 @@ jobs:
 
   linux:
     needs: version
+    if: needs.version.outputs.build == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -175,10 +202,11 @@ jobs:
       - name: Record the checksums
         working-directory: artifacts
         run: sha256sum ./*.dmg ./*.zip ./*.tar.gz > SHA256SUMS
-      - name: Publish the draft release
+      - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.version.outputs.version }}
+          DRAFT: ${{ needs.version.outputs.draft }}
         run: |
           set -eu
           cat > notes.md <<NOTES
@@ -203,5 +231,6 @@ jobs:
           \`xattr -dr com.apple.quarantine /Applications/illogical.app\`.
           NOTES
           if [ "$GITHUB_REF_TYPE" = tag ]; then TAG=$GITHUB_REF_NAME; else TAG=v$VERSION; fi
-          gh release create "$TAG" artifacts/* --draft --target "$GITHUB_SHA" \
+          if [ "$DRAFT" = true ]; then set -- --draft; else set --; fi
+          gh release create "$TAG" artifacts/* "$@" --target "$GITHUB_SHA" \
               --title "illogical $VERSION" --notes-file notes.md --generate-notes

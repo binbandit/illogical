@@ -1,9 +1,9 @@
 # Releases
 
 `.github/workflows/release.yml` builds everything a user downloads: the macOS
-application and the Linux service archives. It runs on `v*` tags, on manual
-dispatch, and on pull requests that touch the packaging scripts, the pinned
-Ghostty patches, or the workflow itself.
+application and the Linux service archives. It runs on every push to `main`,
+on `v*` tags, on manual dispatch, and on pull requests that touch the packaging
+scripts, the pinned Ghostty patches, or the workflow itself.
 
 ## Artifacts
 
@@ -22,17 +22,36 @@ helper, which the flake's `login-helper` package and the NixOS module install.
 
 ## Cutting a release
 
-Push a tag: `git tag v0.2.0 && git push origin v0.2.0`. The workflow builds each
-platform, then opens a **draft** release with the artifacts, the download
-instructions, and generated commit notes. Review the draft and publish it.
+Merging to `main` releases automatically. `scripts/next-version.sh` reads the
+[Conventional Commits](https://www.conventionalcommits.org/) since the last `v*`
+tag and picks the bump:
 
-`workflow_dispatch` takes a `version` for the artifact names and a `publish`
-switch. With `publish` off it only uploads workflow artifacts, which is the way
-to rehearse packaging without touching the releases page.
+| Commits since the last tag | Bump | Example |
+| --- | --- | --- |
+| A `!` after the type, or a `BREAKING CHANGE:` footer | major | `feat(service)!: drop the v1 socket protocol` |
+| `feat` | minor | `feat(workspace): add session rename` |
+| `fix`, `perf`, `revert` | patch | `fix(render): keep the cursor on resize` |
+| Anything else (`docs`, `build`, `ci`, `chore`, `refactor`, `test`) | none | no release |
 
-Tagged builds set `MARKETING_VERSION` from the leading dotted number in the tag
-and `CURRENT_PROJECT_VERSION` from the run number, so the installed bundle
-reports the released version.
+The highest bump wins; with no tag yet the whole history counts and the base is
+`0.0.0`. When there is a bump the workflow builds each platform, tags the
+commit `vVERSION`, and publishes the release with the artifacts, the download
+instructions, and generated commit notes. When there is none the build jobs are
+skipped and the push costs a few seconds. Runs on `main` queue rather than
+cancel each other, so each one sees the tag the previous one created. Squash
+merges take their subject from the pull request title, so word the title as
+the commit you want analyzed.
+
+Pushing a tag by hand (`git tag v0.2.0 && git push origin v0.2.0`) releases
+exactly that version the same way, for a release the commit messages would not
+produce. `workflow_dispatch` takes a `version` for the artifact names and a
+`publish` switch that opens a **draft** release instead; with `publish` off it
+only uploads workflow artifacts, which is the way to rehearse packaging without
+touching the releases page.
+
+Released builds set `MARKETING_VERSION` from the leading dotted number in the
+version and `CURRENT_PROJECT_VERSION` from the run number, so the installed
+bundle reports the released version.
 
 ## Signing and notarization
 
