@@ -3,10 +3,78 @@ import Combine
 import SwiftUI
 
 enum PaletteMode: String, Identifiable { case sessions, commands, themes, directory; var id: String { rawValue } }
+enum PaneDirection { case left, right, up, down }
+
+private extension SplitLayout {
+    func adjacentBlock(from block: String, direction: PaneDirection) -> String? {
+        var panes: [(block: String, rect: CGRect)] = []
+        func collect(_ node: SplitLayout, in rect: CGRect) {
+            if let block = node.block { panes.append((block, rect));return }
+            guard let first = node.first, let second = node.second else { return }
+            let supplied = node.ratio ?? 0.5
+            let ratio = supplied.isFinite ? max(0, min(1, supplied)) : 0.5
+            var firstRect = rect, secondRect = rect
+            if node.axis == "horizontal" {
+                firstRect.size.width *= ratio
+                secondRect.origin.x += firstRect.width;secondRect.size.width -= firstRect.width
+            } else {
+                firstRect.size.height *= ratio
+                secondRect.origin.y += firstRect.height;secondRect.size.height -= firstRect.height
+            }
+            collect(first, in: firstRect);collect(second, in: secondRect)
+        }
+        collect(self, in: CGRect(x: 0, y: 0, width: 1, height: 1))
+        guard let source = panes.first(where: { $0.block == block })?.rect else { return nil }
+        let horizontal = direction == .left || direction == .right
+        let midpoint = horizontal ? source.midY : source.midX
+        let sourceMin = horizontal ? source.minY : source.minX
+        let sourceMax = horizontal ? source.maxY : source.maxX
+        var best: (block: String, alignment: Int, gap: CGFloat, offset: CGFloat)?
+        for candidate in panes where candidate.block != block {
+            let rect = candidate.rect
+            let gap: CGFloat
+            switch direction {
+            case .left: gap = source.minX - rect.maxX
+            case .right: gap = rect.minX - source.maxX
+            case .up: gap = source.minY - rect.maxY
+            case .down: gap = rect.minY - source.maxY
+            }
+            guard gap >= -0.000001 else { continue }
+            let lower = horizontal ? rect.minY : rect.minX
+            let upper = horizontal ? rect.maxY : rect.maxX
+            let alignment = lower <= midpoint && midpoint < upper ? 0 : (min(sourceMax, upper) > max(sourceMin, lower) ? 1 : 2)
+            let offset = abs((lower + upper) / 2 - midpoint)
+            if let best, (best.alignment, best.gap, best.offset) <= (alignment, max(0, gap), offset) { continue }
+            best = (candidate.block, alignment, max(0, gap), offset)
+        }
+        return best?.block
+    }
+}
+
+@MainActor
+private final class HostProfileStore {
+    static let shared = HostProfileStore()
+    @Published private(set) var hosts: [HostProfile]
+
+    private init() {
+        let saved = UserDefaults.standard.data(forKey: "hosts")
+            .flatMap { try? JSONDecoder().decode([HostProfile].self, from: $0) } ?? []
+        hosts = [.local] + saved.filter { !$0.isLocal }
+    }
+
+    func add(_ host: HostProfile) { save(hosts + [host]) }
+    func remove(_ id: String) { save(hosts.filter { $0.id != id || $0.isLocal }) }
+
+    private func save(_ updated: [HostProfile]) {
+        guard updated != hosts, let data = try? JSONEncoder().encode(updated.filter { !$0.isLocal }) else { return }
+        UserDefaults.standard.set(data, forKey: "hosts")
+        hosts = updated
+    }
+}
 
 @MainActor
 final class WorkspaceModel: ObservableObject {
-    @Published var hosts: [HostProfile] = [.local]
+    @Published private(set) var hosts: [HostProfile] = [.local]
     @Published var states: [String: WorkspaceState] = [:]
     @Published private(set) var processIdentities: [String: ChildProcess] = [:]
     @Published private(set) var hostFeatures: [String: Set<String>] = [:]
@@ -16,7 +84,7 @@ final class WorkspaceModel: ObservableObject {
     @Published var selectedDeck = ""
     @Published var focusedBlock = ""
     @Published var focusToken = UUID()
-    @Published var palette: PaletteMode?
+    @Published var palette: PaletteMode? { didSet { if palette != .directory { cancelDirectory() } } }
     @Published var showSettings = false
     @Published var showAddHost = false
     @Published var showRename = false
@@ -28,9 +96,10 @@ final class WorkspaceModel: ObservableObject {
     @Published var showPaneTitles: Bool { didSet { preferences.set(showPaneTitles, forKey: "showPaneTitles") } }
     @Published private(set) var searches: [String: TerminalSearchState] = [:]
     @Published var searchFocusedBlock: String?
-    @Published var directories: [DirectoryEntry] = []
-    @Published var directoryPath = ""
-    @Published var directoryLoading = false
+    @Published private(set) var directories: [DirectoryEntry] = []
+    @Published private(set) var directoryPath = ""
+    @Published private(set) var directoryLoading = false
+    @Published private(set) var directoryError: String?
     @Published var importedThemes: [TerminalTheme] = []
     @Published var migration: [TerminalTheme] = []
     @Published var themeName: String { didSet { preferences.set(themeName,forKey:"theme");applyAppearance() } }
@@ -60,17 +129,28 @@ final class WorkspaceModel: ObservableObject {
     }
     @Published var copyOnSelection: Bool { didSet { preferences.set(copyOnSelection, forKey: "copyOnSelection") } }
     private let preferences = UserDefaults.standard
+    private let hostStore = HostProfileStore.shared
+    private var hostObservation: AnyCancellable?
     private var appearanceObservation: NSKeyValueObservation?
     private var connections: [String: ServiceConnection] = [:]
     private var engines: [String: TerminalEngine] = [:]
     private var engineHosts: [String: String] = [:]
     private var initialized = Set<String>()
-    private var rememberedDecks: [String: String] = [:]
+    private var rememberedDecks: [String: [String: String]] = [:]
+    private var rememberedBlocks: [String: [String: String]] = [:]
+    private struct DirectoryContext: Equatable {
+        let host: String
+        let session: String
+        let deck: String
+        let block: String
+    }
+    private var directoryContext: DirectoryContext?
     private var directoryRequest: String?
     private var started = false
     private var processLookups: [String: Task<Void, Never>] = [:]
     private var processVersions: [String: String] = [:]
     private var pendingBlock: String?
+    private var pendingPaneNavigation: (host: String, session: String, deck: String, block: String, request: String)?
     private var renameContext: (host: String, session: String, window: String?)?
     var onLaunchStage: ((String) -> Void)?
     var onRequestActivation: (() -> Void)?
@@ -91,7 +171,6 @@ final class WorkspaceModel: ObservableObject {
         contrastCorrection=defaults.object(forKey:"contrastCorrection") as? Bool ?? true
         copyOnSelection=defaults.bool(forKey:"copyOnSelection")
         synchronizeViewports=defaults.bool(forKey:"synchronizeViewports")
-        if let data=defaults.data(forKey:"hosts"),let saved=try? JSONDecoder().decode([HostProfile].self,from:data){hosts=[.local]+saved.filter{!$0.isLocal}}
         if let data=defaults.data(forKey:"importedThemes"),let themes=try? JSONDecoder().decode([TerminalTheme].self,from:data){importedThemes=themes}
         selectedHost=defaults.string(forKey:"selectedHost") ?? "local"
         selectedSession=defaults.string(forKey:"selectedSession") ?? ""
@@ -99,6 +178,7 @@ final class WorkspaceModel: ObservableObject {
         appearanceObservation = NSApplication.shared.observe(\.effectiveAppearance, options: [.new]) { [weak self] _, _ in
             Task { @MainActor in self?.applySystemAppearance() }
         }
+        hostObservation = hostStore.$hosts.sink { [weak self] in self?.updateHosts($0) }
         applySystemAppearance()
     }
 
@@ -123,7 +203,7 @@ final class WorkspaceModel: ObservableObject {
     var currentTitle: String { activeSession?.name ?? "illogical" }
 
     func start() { guard !started else{return};started=true;for host in hosts{connect(host)} }
-    func close() { for lookup in processLookups.values { lookup.cancel() };processLookups.removeAll();for connection in connections.values{connection.close()};connections.removeAll();started=false }
+    func close() { pendingPaneNavigation = nil;cancelDirectory();for lookup in processLookups.values { lookup.cancel() };processLookups.removeAll();for connection in connections.values{connection.close()};connections.removeAll();started=false }
 
     private func connect(_ host:HostProfile) {
         onLaunchStage?("connectionStart")
@@ -152,7 +232,12 @@ final class WorkspaceModel: ObservableObject {
             onLaunchStage?("workspaceState")
             refreshProcessIdentities(state, host: host)
             states[host]=state
+            if let pending = pendingPaneNavigation, pending.host == host {
+                let deck = state.sessions.first { $0.id == pending.session }?.windows.first { $0.id == pending.deck }
+                if deck?.zoomed == pending.block || deck?.root.blocks.contains(pending.block) != true { pendingPaneNavigation = nil }
+            }
             let valid=Set(state.blocks.map(\.id))
+            if let remembered = rememberedBlocks[host] { rememberedBlocks[host] = remembered.filter { valid.contains($0.value) } }
             discardEngines(engineHosts.compactMap { $0.value == host && !valid.contains($0.key) ? $0.key : nil })
             if !initialized.contains(host) {
                 initialized.insert(host)
@@ -163,10 +248,14 @@ final class WorkspaceModel: ObservableObject {
                 if pendingBlock != nil { return }
                 if let session=state.sessions.first(where:{$0.id==selectedSession}) {
                     if !session.windows.contains(where:{$0.id==selectedDeck}){selectedDeck=session.windows.first?.id ?? ""}
-                    if let deck=activeDeck,!deck.root.blocks.contains(focusedBlock){focus(deck.root.blocks.first ?? "")}
+                    if let deck=activeDeck {
+                        let preferred = preferredBlock(in: deck)
+                        if focusedBlock != preferred { focus(preferred) }
+                    }
                 } else if let first=state.sessions.first { choose(session:first.id,host:host) }
                 else { selectedSession="";selectedDeck="";focusedBlock="" }
             }
+            if palette == .directory && !directoryContextIsCurrent { palette = nil }
         }
         if let block=message.block {
             if ["snapshot","history","output","resize","theme","graphics","resume","resync"].contains(message.type) {
@@ -275,24 +364,75 @@ final class WorkspaceModel: ObservableObject {
     }
 
     func choose(session:String,host:String) {
+        pendingPaneNavigation = nil
         selectedHost=host;selectedSession=session
         let available=states[host]?.sessions.first{$0.id==session}?.windows ?? []
-        selectedDeck=available.first{$0.id==rememberedDecks[session]}?.id ?? available.first?.id ?? ""
-        focusedBlock=activeDeck?.root.blocks.first ?? "";palette=nil;peek=0
-        saveSelection();focus(focusedBlock)
+        selectedDeck=available.first{$0.id==rememberedDecks[host]?[session]}?.id ?? available.first?.id ?? ""
+        palette=nil;peek=0
+        saveSelection();focus(activeDeck.map(preferredBlock) ?? "")
     }
 
     func choose(deck:String,session:String?=nil,host:String?=nil) {
+        pendingPaneNavigation = nil
         if let host{selectedHost=host};if let session{selectedSession=session}
-        selectedDeck=deck;rememberedDecks[selectedSession]=deck
-        focusedBlock=activeDeck?.root.blocks.first ?? "";palette=nil;peek=0
-        saveSelection();focus(focusedBlock)
+        selectedDeck=deck;rememberedDecks[selectedHost, default: [:]][selectedSession]=deck
+        palette=nil;peek=0
+        saveSelection();focus(activeDeck.map(preferredBlock) ?? "")
+    }
+
+    func selectAdjacentTab(_ delta: Int) {
+        guard delta != 0, let tabs = activeSession?.windows, !tabs.isEmpty else { return }
+        guard let current = tabs.firstIndex(where: { $0.id == selectedDeck }) else {
+            choose(deck: delta > 0 ? tabs[0].id : tabs[tabs.count - 1].id);return
+        }
+        let next = (current + delta % tabs.count + tabs.count) % tabs.count
+        if next != current { choose(deck: tabs[next].id) }
+    }
+
+    func selectTab(_ index: Int) {
+        guard let tabs = activeSession?.windows, !tabs.isEmpty else { return }
+        let selected = index == 8 ? tabs.count - 1 : index
+        guard tabs.indices.contains(selected) else { return }
+        choose(deck: tabs[selected].id)
+    }
+
+    func focusAdjacentPane(_ direction: PaneDirection) {
+        guard let deck = activeDeck else { return }
+        let source: String
+        if let pending = pendingPaneNavigation, pending.host == selectedHost, pending.session == selectedSession, pending.deck == deck.id {
+            source = pending.block
+        } else { source = focusedBlock }
+        guard let target = deck.root.adjacentBlock(from: source, direction: direction) else { return }
+        if let zoomed = deck.zoomed, !zoomed.isEmpty {
+            let host = selectedHost
+            let request = WireRequest(method: "window.zoom", window: deck.id, block: target)
+            pendingPaneNavigation = (host, selectedSession, deck.id, target, request.id)
+            // Keep focus on the visible pane until the service publishes its new
+            // zoom state. Pending intent prevents repeated keys toggling zoom off.
+            send(request, host: host) { [weak self] message in
+                guard let self, message.error != nil, self.pendingPaneNavigation?.request == request.id else { return }
+                self.pendingPaneNavigation = nil
+            }
+        } else { focus(target) }
+    }
+
+    private func preferredBlock(in deck: Deck) -> String {
+        let blocks = deck.root.blocks
+        if let zoomed = deck.zoomed, blocks.contains(zoomed) { return zoomed }
+        if let remembered = rememberedBlocks[selectedHost]?[deck.id], blocks.contains(remembered) { return remembered }
+        return blocks.first ?? ""
     }
 
     func focus(_ block:String) {
-        guard !block.isEmpty else{return}
+        var block = block
+        if let deck = activeDeck, deck.root.blocks.contains(block) {
+            if let zoomed = deck.zoomed, deck.root.blocks.contains(zoomed) { block = zoomed }
+            rememberedBlocks[selectedHost, default: [:]][deck.id] = block
+        }
         searchFocusedBlock = nil
         focusedBlock=block;focusToken=UUID();engines[block]?.requestedSize = nil
+        if palette == .directory && !directoryContextIsCurrent { palette = nil }
+        guard !block.isEmpty else { return }
         send(WireRequest(method:"block.claim",block:block),host:engineHosts[block] ?? selectedHost)
     }
 
@@ -302,7 +442,7 @@ final class WorkspaceModel: ObservableObject {
         guard message.error==nil else{return}
         selectedHost=host
         if let session=message.session{selectedSession=session}
-        if let window=message.window{selectedDeck=window;rememberedDecks[selectedSession]=window}
+        if let window=message.window{selectedDeck=window;rememberedDecks[host, default: [:]][selectedSession]=window}
         if let block=message.block{focusedBlock=block;pendingBlock=block}
         saveSelection();palette=nil;peek=0;focusToken=UUID()
     }
@@ -388,13 +528,55 @@ final class WorkspaceModel: ObservableObject {
         withTransaction(transaction, change)
     }
     func togglePeek(_ level: CGFloat) { animateNavigation { peek = peek == level ? 0 : level } }
-    func showDirectory(){palette = .directory;loadDirectory("")}
-    func loadDirectory(_ path:String){
-        let request=WireRequest(method:"directory.list",block:focusedBlock,cwd:path);directoryRequest=request.id;directoryLoading=true
-        send(request){[weak self] message in
-            guard let self,self.directoryRequest==request.id else{return};self.directoryLoading=false
-            if let entries=message.entries{self.directories=entries;self.directoryPath=message.path ?? path}
+    func showDirectory() {
+        cancelDirectory()
+        guard let deck = activeDeck, deck.root.blocks.contains(focusedBlock) else { return }
+        directoryContext = DirectoryContext(host: selectedHost, session: selectedSession, deck: deck.id, block: focusedBlock)
+        palette = .directory
+        loadDirectory("")
+    }
+
+    private var directoryContextIsCurrent: Bool {
+        guard let context = directoryContext, palette == .directory,
+              context.host == selectedHost, context.session == selectedSession,
+              context.deck == selectedDeck, context.block == focusedBlock,
+              hosts.contains(where: { $0.id == context.host }),
+              states[context.host]?.blocks.contains(where: { $0.id == context.block }) == true,
+              activeDeck?.root.blocks.contains(context.block) == true else { return false }
+        return true
+    }
+
+    var canOpenDirectory: Bool { directoryContextIsCurrent && !directoryLoading && !directoryPath.isEmpty && directoryError == nil }
+
+    private func cancelDirectory() {
+        guard directoryContext != nil || directoryRequest != nil || directoryLoading ||
+                !directories.isEmpty || !directoryPath.isEmpty || directoryError != nil else { return }
+        directoryRequest = nil;directoryContext = nil;directoryLoading = false
+        directories = [];directoryPath = "";directoryError = nil
+    }
+
+    func loadDirectory(_ path: String) {
+        guard directoryContextIsCurrent, let context = directoryContext else { return }
+        let request = WireRequest(method: "directory.list", block: context.block, cwd: path)
+        directoryRequest = request.id;directoryLoading = true
+        directories = [];directoryPath = "";directoryError = nil
+        send(request, host: context.host) { [weak self] message in
+            guard let self, self.directoryRequest == request.id, self.directoryContext == context else { return }
+            guard self.directoryContextIsCurrent else { self.palette = nil;return }
+            self.directoryRequest = nil;self.directoryLoading = false
+            guard message.error == nil, let entries = message.entries, let path = message.path, !path.isEmpty else {
+                self.directoryError = message.error ?? "This directory is no longer available."
+                return
+            }
+            self.directories = entries;self.directoryPath = path
         }
+    }
+
+    func openDirectory() {
+        guard canOpenDirectory, let context = directoryContext else { return }
+        let request = WireRequest(method: "window.new", session: context.session, block: context.block, cwd: directoryPath)
+        palette = nil
+        send(request, host: context.host) { [weak self] in self?.created($0, host: context.host) }
     }
 
     func applyAppearance(){
@@ -406,16 +588,28 @@ final class WorkspaceModel: ObservableObject {
         let trimmed=address.trimmingCharacters(in:.whitespacesAndNewlines)
         guard !trimmed.isEmpty,trimmed.range(of:"^[A-Za-z0-9_.@:\\[\\]-]+$",options:.regularExpression) != nil,!trimmed.hasPrefix("-") else{notice="Enter a hostname, SSH alias, or user@host.";return}
         let profile=HostProfile(id:UUID().uuidString,name:name.isEmpty ? trimmed : name,address:trimmed,executable:executable.isEmpty ? "illogical" : executable)
-        hosts.append(profile);persistHosts();connect(profile);showAddHost=false
+        hostStore.add(profile);showAddHost=false
     }
     func removeHost(_ host:HostProfile){
         guard !host.isLocal else{return}
+        hostStore.remove(host.id)
+    }
+
+    private func updateHosts(_ updated: [HostProfile]) {
+        let removed = hosts.filter { old in !updated.contains(where: { $0.id == old.id }) }
+        let added = updated.filter { new in !hosts.contains(where: { $0.id == new.id }) }
+        hosts = updated
+        for host in removed { disconnectHost(host) }
+        if started { for host in added { connect(host) } }
+    }
+
+    private func disconnectHost(_ host: HostProfile) {
         connections[host.id]?.close();connections.removeValue(forKey:host.id)
         discardEngines(Array(Set(engineHosts.compactMap { $0.value == host.id ? $0.key : nil } + (states[host.id]?.blocks.map(\.id) ?? []))))
-        for session in states[host.id]?.sessions ?? [] { rememberedDecks.removeValue(forKey:session.id) }
+        rememberedDecks.removeValue(forKey: host.id);rememberedBlocks.removeValue(forKey: host.id)
         initialized.remove(host.id)
-        states.removeValue(forKey:host.id);statuses.removeValue(forKey:host.id);hostFeatures.removeValue(forKey:host.id);hosts.removeAll{$0.id==host.id};persistHosts()
-        if selectedHost==host.id{selectedHost="local";if let session=states["local"]?.sessions.first{choose(session:session.id,host:"local")}}
+        states.removeValue(forKey:host.id);statuses.removeValue(forKey:host.id);hostFeatures.removeValue(forKey:host.id)
+        if selectedHost == host.id { choose(session: states["local"]?.sessions.first?.id ?? "", host: "local") }
     }
     private func discardEngines(_ blocks:[String]) {
         guard !blocks.isEmpty else{return}
@@ -423,7 +617,6 @@ final class WorkspaceModel: ObservableObject {
         if let pendingBlock,blocks.contains(pendingBlock){self.pendingBlock=nil}
         for block in blocks { engines.removeValue(forKey:block);engineHosts.removeValue(forKey:block);processLookups.removeValue(forKey:block)?.cancel();processIdentities.removeValue(forKey:block);processVersions.removeValue(forKey:block) }
     }
-    private func persistHosts(){if let data=try? JSONEncoder().encode(hosts.filter{!$0.isLocal}){preferences.set(data,forKey:"hosts")}}
 
     func importGhostty(){
         do { migration=try GhosttyThemeImporter.importConfiguration() }
@@ -448,6 +641,3 @@ final class WorkspaceModel: ObservableObject {
         migration=[]
     }
 }
-
-struct WorkspaceFocusKey: FocusedValueKey { typealias Value = WorkspaceModel }
-extension FocusedValues { var workspace: WorkspaceModel? { get{self[WorkspaceFocusKey.self]} set{self[WorkspaceFocusKey.self]=newValue} } }

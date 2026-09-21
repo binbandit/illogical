@@ -13,7 +13,7 @@ import SwiftUI
 }
 
 struct WorkspaceCommands: Commands {
-    @FocusedValue(\.workspace) private var model
+    @FocusedObject private var model: WorkspaceModel?
     @Environment(\.openWindow) private var openWindow
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
@@ -21,11 +21,38 @@ struct WorkspaceCommands: Commands {
             Button("New Tab") { model?.newTab() }.keyboardShortcut("t")
             Button("New Window") { openWindow(id: "workspace") }.keyboardShortcut("n", modifiers: [.command, .shift])
         }
+        CommandGroup(replacing: .saveItem) {
+            Button("Close Pane") { model?.closeBlock() }.keyboardShortcut("w")
+                .disabled(model?.focusedBlock.isEmpty != false)
+            Button("Close Window") { NSApp.keyWindow?.performClose(nil) }
+        }
         CommandGroup(replacing: .appSettings) { Button("Appearance…") { model?.showSettings = true }.keyboardShortcut(",") }
         CommandMenu("Workspace") {
             Button("Switch Session…") { model?.palette = .sessions }.keyboardShortcut("k")
             Button("Command Palette…") { model?.palette = .commands }.keyboardShortcut("p", modifiers: [.command, .shift])
             Button("Open from Directory…") { model?.showDirectory() }.keyboardShortcut("g", modifiers: [.command, .shift])
+            Divider()
+            Button("Previous Tab") { model?.selectAdjacentTab(-1) }.keyboardShortcut("[", modifiers: [.command, .shift])
+                .disabled((model?.activeSession?.windows.count ?? 0) < 2)
+            Button("Next Tab") { model?.selectAdjacentTab(1) }.keyboardShortcut("]", modifiers: [.command, .shift])
+                .disabled((model?.activeSession?.windows.count ?? 0) < 2)
+            Button("Cycle to Previous Tab") { model?.selectAdjacentTab(-1) }.keyboardShortcut(.tab, modifiers: [.control, .shift])
+                .disabled((model?.activeSession?.windows.count ?? 0) < 2)
+            Button("Cycle to Next Tab") { model?.selectAdjacentTab(1) }.keyboardShortcut(.tab, modifiers: [.control])
+                .disabled((model?.activeSession?.windows.count ?? 0) < 2)
+            Menu("Select Tab") {
+                ForEach(0..<9) { index in
+                    Button(index == 8 ? "Last Tab" : "Tab \(index + 1)") { model?.selectTab(index) }
+                        .keyboardShortcut(KeyEquivalent(Character(String(index + 1))), modifiers: [.command])
+                        .disabled((model?.activeSession?.windows.count ?? 0) <= (index == 8 ? 0 : index))
+                }
+            }
+            Menu("Focus Pane") {
+                Button("Left") { model?.focusAdjacentPane(.left) }.keyboardShortcut(.leftArrow, modifiers: [.command, .option])
+                Button("Right") { model?.focusAdjacentPane(.right) }.keyboardShortcut(.rightArrow, modifiers: [.command, .option])
+                Button("Above") { model?.focusAdjacentPane(.up) }.keyboardShortcut(.upArrow, modifiers: [.command, .option])
+                Button("Below") { model?.focusAdjacentPane(.down) }.keyboardShortcut(.downArrow, modifiers: [.command, .option])
+            }.disabled((model?.activeDeck?.root.blocks.count ?? 0) < 2)
             Divider()
             Button("Split Right") { model?.split("horizontal") }.keyboardShortcut("d")
             Button("Split Down") { model?.split("vertical") }.keyboardShortcut("d", modifiers: [.command, .shift])

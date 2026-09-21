@@ -9,8 +9,8 @@ struct WorkspaceResourceTests {
         UserDefaults.standard.removePersistentDomain(forName: domain)
         defer { UserDefaults.standard.removePersistentDomain(forName: domain) }
         let model = WorkspaceModel()
-        let host = HostProfile(id: "resource-removed-host", name: "Resource fixture", address: "invalid.invalid", executable: "illogical")
-        model.hosts.append(host)
+        model.addHost(name: "Resource fixture", address: "invalid.invalid", executable: "illogical")
+        let host = model.hosts.first { !$0.isLocal }!
         weak let removed = model.engine(for: "removed-block", host: host.id)
         weak let retained = model.engine(for: "retained-block", host: "local")
         model.focusedBlock = "removed-block"; model.find()

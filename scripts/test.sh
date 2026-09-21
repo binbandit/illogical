@@ -25,6 +25,8 @@ printf '\nSynchronized output, dirty rows, and rendering deadline checks\n'
 printf '\nKeyboard, IME, and foreground-process input checks\n'
 ./scripts/test-input.sh
 ./scripts/test-terminal-protocols.sh
+./scripts/test-terminal-scrolling.sh
+./scripts/test-terminal-links.sh
 
 printf '\nConnection delivery, backpressure, and JSON framing checks\n'
 ./scripts/test-connection.sh
@@ -46,6 +48,7 @@ printf '\nSearch, contrast, and independent pane search checks\n'
 ./scripts/test-search-contrast.sh
 ./scripts/test-workspace-search.sh
 ./scripts/test-workspace-rename.sh
+./scripts/test-workspace-navigation.sh
 ./scripts/test-theme-import.sh
 
 printf '\nAll checks passed.\n'

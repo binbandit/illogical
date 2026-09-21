@@ -24,7 +24,7 @@ struct ContentView: View {
         .frame(minWidth: 760, minHeight: 480)
         .ignoresSafeArea()
         .background(WindowSetup(model: model))
-        .focusedSceneValue(\.workspace, model)
+        .focusedSceneObject(model)
         .onAppear {
             if LaunchMetrics.tracing { model.onLaunchStage = { LaunchMetrics.mark($0) } }
             LaunchMetrics.mark("contentAppeared");model.start()
@@ -103,13 +103,18 @@ struct WorkspaceTitlebar: View {
             }.buttonStyle(.plain).help("Switch session (⌘K)").accessibilityLabel("Switch session")
             }
             if !model.verticalTabs {
-                ScrollView(.horizontal) {
-                    HStack(spacing: 5) {
-                        ForEach(model.activeSession?.windows ?? []) { deck in
-                            DeckTab(model: model, deck: deck, session: model.selectedSession, host: model.selectedHost)
-                        }
-                    }.padding(.vertical, 3)
-                }.scrollIndicators(.hidden)
+                ScrollViewReader { reader in
+                    ScrollView(.horizontal) {
+                        HStack(spacing: 5) {
+                            ForEach(model.activeSession?.windows ?? []) { deck in
+                                DeckTab(model: model, deck: deck, session: model.selectedSession, host: model.selectedHost)
+                                    .id(deck.id)
+                            }
+                        }.padding(.vertical, 3)
+                    }.scrollIndicators(.hidden)
+                        .onChange(of: model.selectedDeck) { reader.scrollTo(model.selectedDeck, anchor: .center) }
+                        .onAppear { reader.scrollTo(model.selectedDeck, anchor: .center) }
+                }
             } else { Spacer() }
             Button { model.newTab() } label: { Image(systemName: "plus").frame(width: 24, height: 28) }
                 .buttonStyle(.plain).help("New tab (⌘T)").accessibilityLabel("New tab")
@@ -183,6 +188,7 @@ struct WorkspaceSidebar: View {
     @ObservedObject var model: WorkspaceModel
     var body: some View {
         VStack(spacing: 10) {
+            ScrollViewReader { reader in
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     ForEach(model.hosts) { host in
@@ -196,7 +202,10 @@ struct WorkspaceSidebar: View {
                                             Spacer()
                                             Button { model.choose(session: session.id, host: host.id); model.newTab() } label: { Image(systemName: "plus").font(.system(size: 10)) }.buttonStyle(.plain)
                                         }.padding(.horizontal, 10).padding(.bottom, 4)
-                                        ForEach(session.windows) { deck in DeckTab(model: model, deck: deck, session: session.id, host: host.id, vertical: true) }
+                                        ForEach(session.windows) { deck in
+                                            DeckTab(model: model, deck: deck, session: session.id, host: host.id, vertical: true)
+                                                .id(host.id + ":" + deck.id)
+                                        }
                                     }
                                     .contextMenu {
                                         Button("Rename Session…") { model.rename(session: session.id, host: host.id) }
@@ -207,6 +216,9 @@ struct WorkspaceSidebar: View {
                         }
                     }
                 }.padding(10)
+            }
+            .onChange(of: model.selectedHost + ":" + model.selectedDeck) { reader.scrollTo(model.selectedHost + ":" + model.selectedDeck, anchor: .center) }
+            .onAppear { reader.scrollTo(model.selectedHost + ":" + model.selectedDeck, anchor: .center) }
             }
             HStack(spacing: 8) {
                 Image(systemName: "line.3.horizontal.decrease").opacity(0.5)

@@ -29,8 +29,9 @@ struct PaletteOverlay: View {
         case .themes:
             all = model.themes.map { theme in Item(id: theme.id, title: theme.name, detail: theme.isLight ? "Light" : "Dark", icon: "paintpalette", theme: theme, action: { model.selectTheme(theme.name); model.palette = nil }) }
         case .directory:
+            guard model.canOpenDirectory else { return [] }
             let parent = (model.directoryPath as NSString).deletingLastPathComponent
-            all = [Item(id: "open", title: "Open terminal here", detail: model.directoryPath, icon: "plus.rectangle", action: { model.newTab(cwd: model.directoryPath); model.palette = nil }), Item(id: "parent", title: "..", detail: "Parent directory", icon: "arrow.turn.up.left", action: { query = ""; model.loadDirectory(parent) })] + model.directories.filter { $0.name != ".." }.map { entry in
+            all = [Item(id: "open", title: "Open terminal here", detail: model.directoryPath, icon: "plus.rectangle", action: { model.openDirectory() }), Item(id: "parent", title: "..", detail: "Parent directory", icon: "arrow.turn.up.left", action: { query = ""; model.loadDirectory(parent) })] + model.directories.filter { $0.name != ".." }.map { entry in
                 Item(id: entry.id, title: entry.name, icon: "folder", action: { query = ""; model.loadDirectory(entry.path) })
             }
         case .commands:
@@ -105,9 +106,9 @@ struct PaletteOverlay: View {
                                     .background(selected == index ? Color.accentColor : .clear, in: RoundedRectangle(cornerRadius: 6))
                                     .contextMenu { if let rename = item.rename { Button("Rename Session…", action: rename) } }.id(index)
                             }
-                            if items.isEmpty { Text("No results").font(.system(size: 12)).opacity(0.45).padding(24) }
+                            if items.isEmpty { Text(mode == .directory ? (model.directoryLoading ? "Loading directory…" : model.directoryError ?? "No results") : "No results").font(.system(size: 12)).opacity(0.45).padding(24) }
                         }.padding(7)
-                    }.frame(height: min(CGFloat(items.count * 32 + 14), mode == .directory ? 440 : 380))
+                    }.frame(height: items.isEmpty ? 78 : min(CGFloat(items.count * 32 + 14), mode == .directory ? 440 : 380))
                         .onChange(of: selected) { reader.scrollTo(selected) }
                 }
             }.frame(width: mode == .sessions ? 280 : 360).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 13))

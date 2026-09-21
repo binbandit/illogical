@@ -4,6 +4,40 @@ Audited application revision: `09ad6936c21d37feeae0c5fe12342709f2805e7b`, 21 Sep
 
 Three independent audits covered service/CLI behavior, native terminal input, and workspace state. A separate native UI check confirmed the zoom/focus failure. Service probes used a new private daemon with disposable children. Workspace probes compiled the production model and connection code against a disposable socket and private preference domain. Terminal probes compiled the production bridge, engine, surface and renderer with synthetic AppKit events. No daily-driver service, installed application, or user preferences were changed.
 
+## Implementation follow-up
+
+The subsequent fix pass addresses F01-F10 and selection autoscroll. The oversized-grapheme blanking case now has an explicit bounded fallback: cells exceeding the renderer's 127-byte text capacity show their base codepoint, while the terminal retains complete copyable text. This prevents invisible content without increasing every rendered cell's memory or adding render-loop allocations; it does not claim complete shaping of arbitrarily long clusters.
+
+| Finding | Correction | Maintained regression |
+| --- | --- | --- |
+| F01 | Zoomed panes take precedence during selection and commands; ordinary tabs remember their last focused pane | `WorkspaceNavigationTests.swift`: visible-pane Find/Close, tab/session focus restoration |
+| F02 | Move/swap validates actual terminal IDs and mutates copied layouts before committing atomically | `lifecycle_test.go`: rejected IDs preserve state/PIDs; valid same-window and cross-session moves/swaps |
+| F03 | Directory results/actions capture their host/session/tab/pane; loading, errors, canceled and stale requests expose no actionable old path | `WorkspaceNavigationTests.swift`: delayed/reordered replies, host/pane changes, removal and errors |
+| F04 | A shared observable host store synchronizes additions/removals across windows without polling | `WorkspaceNavigationTests.swift`: two models, reopen persistence, removal propagation, released subscription lifetime |
+| F05 | Events carry membership captured at emission; the CLI pins session-name filters to IDs and retains older-service fallback | `events_test.go`: all 15 bell/exit/close events in unfiltered, session-ID, session-name and window streams, including a rename |
+| F06 | Permanent block removal deletes the snapshot after terminal I/O ends; ordinary service shutdown retains it | `lifecycle_test.go`: block/window/session deletion and natural exit versus shutdown |
+| F07 | Exact IDs resolve before names in both service and CLI resource selection | `lifecycle_test.go` and `events_test.go`: collision, inspect/kill and filter resolution |
+| F08/F09 | Native wheel callbacks normalize both axes and discrete detents; alternate scroll uses current cursor mode and respects terminal mouse reporting | `TerminalScrollingTests.swift`: native callbacks, direction/mode controls, precise accumulation and source changes |
+| F10 | Plain URL detection uses Ghostty logical-line selection/UTF-8 formatting; OSC 8 takes precedence | `terminal_links_test.c`: localhost, punctuation, balanced parentheses, Unicode, soft wraps/scrollback, negative hits and unchanged selection |
+| Selection autoscroll | Ghostty gesture ticks run only during active outside-edge selection | `TerminalScrollingTests.swift`: copied content, upward/downward movement and stop on release/re-entry/boundary/hide/occlusion/focus loss/preview/unmount/teardown |
+| Oversized graphemes | Preserve the base codepoint when UTF-8 extraction exceeds the fixed cell buffer | `terminal_grapheme_test.c`: visible base and complete copy data for the original oversized cluster |
+
+Fresh private-daemon CLI reproductions changed scoped delivery from 0/15 to 15/15, rejected invalid move/swap targets, removed deleted snapshots, and killed the correctly addressed session. Native Release QA repeated the zoom/right-pane/tab-return/Command-F sequence and showed search in the visible right pane. Its directory picker opened `/private/tmp`, confirmed by `pwd` in the new terminal. The disposable QA app and its service were stopped afterward.
+
+Plain links use the existing `http`, `https`, `file` and `mailto` opening policy. Matching runs only on click, follows wrapped logical lines and semantic prompt boundaries, and is bounded to 64 KiB of line text. This is not Ghostty's complete configurable URL/file-path matching system. The selection timer is absent at idle; shared hosts use notifications, and the common glyph extraction path retains its fixed allocation. These are implementation/resource checks, not a new battery or matched-Ghostty performance benchmark.
+
+Validation commands are included in `scripts/test.sh`, including the new `test-terminal-scrolling.sh`, `test-terminal-links.sh` and `test-workspace-navigation.sh`. The full aggregate, Release build and the native QA cases above passed. The URL bridge additionally passed Address Sanitizer. Full-run evidence is retained locally in `.build/followup-fixes/`; the first aggregate attempt collided with a parallel test compiler writing the same object file, so the aggregate was rerun sequentially after all agent test processes exited.
+
+### Keyboard navigation follow-up
+
+The subsequent missing-shortcut report adds session-local next/previous tabs with wraparound, Command-1 through Command-8, Command-9 for the last tab, and Command-Option-arrow for directional pane focus. Both Command-Shift-brackets and Control-Tab/Control-Shift-Tab cycle tabs. Controls are listed in the Workspace menu and [README](../README.md). Horizontal and vertical navigation reveal the selected tab when scrolling is needed.
+
+Directional pane navigation follows the current nested split rectangles and ratios. It preserves visible command targeting while a zoom change is in flight, including rapid repeated or reversed arrows. The workspace fixture verifies all four directions in an uneven five-pane layout, changed ratios, edge no-ops, two- and eleven-tab cases, session isolation and pending zoom changes. The native input fixture verifies that Control-Tab yields to menus without leaking bytes or unmatched key releases, while Control-C and Control-Option-Tab remain terminal input. Navigation, rename, search and input checks passed after these additions.
+
+Native QA identified stale menu enablement caused by using an unobserved focused value. Commands now observe the focused workspace object. After rebuilding, native checks passed direct tab selection, both Control-Tab directions, both Command-Shift-bracket directions, all four directional pane shortcuts, and left/right navigation while zoomed. Command-9 selected the last of eleven tabs and scrolled it into view. Command-W now replaces File > Close Window with Close Pane and removed only the focused disposable pane. That check exposed a follow-up cleanup error dialog, and rapid creation exposed an initial overflow-scroll timing issue; both remain under investigation in this checkpoint.
+
+Application installation does not restart an existing service or its running terminals. Client fixes take effect after reopening the updated application; service fixes require its next service start. Older services remain usable through the CLI's legacy event-filter fallback, with their original limitations.
+
 ## Evidence boundaries
 
 Superlogical's public videos establish the workflow families below. They do not reveal its behavior for every invalid ID, delayed response, or mouse event. Findings F01-F07 are verified illogical defects in those workflow families. F08-F10 are concrete differences from Ghostty, whose source can be inspected; their exact Superlogical equivalents remain unverified.

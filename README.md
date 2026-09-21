@@ -51,12 +51,16 @@ Useful shortcuts:
 | Action | Shortcut |
 | --- | --- |
 | New session / tab / window | Command-N / Command-T / Shift-Command-N |
+| Previous / next tab | Shift-Command-[ / Shift-Command-] or Control-Shift-Tab / Control-Tab |
+| Select tab / last tab | Command-1 through Command-8 / Command-9 |
+| Focus split in a direction | Option-Command-arrow key |
 | Split right / down | Command-D / Shift-Command-D |
 | Switch session / commands | Command-K / Shift-Command-P |
 | Find / choose directory | Command-F / Shift-Command-G |
 | Overview / tab previews | Shift-Command-O / Shift-Command-Space |
 | Vertical navigation | Control-Command-V |
-| Zoom / close pane | Shift-Command-Return / Shift-Command-W |
+| Zoom pane | Shift-Command-Return |
+| Close focused pane | Command-W or Shift-Command-W |
 
 ## Service and CLI
 
