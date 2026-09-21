@@ -1,0 +1,207 @@
+name: Release
+
+# Builds the downloadable macOS app and the Linux service archives. Tags publish
+# a draft release; manual runs and packaging changes only upload build artifacts.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version used in the artifact names, for example 0.2.0.
+        type: string
+      publish:
+        description: Publish a draft release with the artifacts.
+        type: boolean
+        default: false
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - illogical.xcodeproj/xcshareddata/**
+      - patches/**
+      - scripts/apply-ghostty-patches.sh
+      - scripts/bootstrap.sh
+      - scripts/build.sh
+      - scripts/bundle-service.sh
+      - scripts/package-linux.sh
+      - scripts/package-macos.sh
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.derive.outputs.version }}
+      short: ${{ steps.derive.outputs.short }}
+      publish: ${{ steps.derive.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: derive
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_PUBLISH: ${{ inputs.publish }}
+        run: |
+          set -eu
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+              VERSION=${GITHUB_REF_NAME#v}
+              PUBLISH=true
+          elif [ -n "$INPUT_VERSION" ]; then
+              VERSION=${INPUT_VERSION#v}
+              PUBLISH=${INPUT_PUBLISH:-false}
+          else
+              VERSION=0.0.0-$(git rev-parse --short HEAD)
+              PUBLISH=false
+          fi
+          # CFBundleShortVersionString only accepts a dotted number.
+          SHORT=$(printf '%s' "$VERSION" | sed -n 's/^\([0-9][0-9.]*[0-9]\).*/\1/p')
+          {
+              echo "version=$VERSION"
+              echo "short=${SHORT:-0.0.0}"
+              echo "publish=$PUBLISH"
+          } >> "$GITHUB_OUTPUT"
+
+  macos:
+    needs: version
+    runs-on: macos-26
+    env:
+      ILLOGICAL_VERSION: ${{ needs.version.outputs.version }}
+      MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: service/go.mod
+          cache-dependency-path: service/go.sum
+      - name: Install pkg-config
+        run: command -v pkg-config >/dev/null || brew install pkgconf
+      - name: Restore the pinned terminal library
+        uses: actions/cache@v6
+        with:
+          path: .build/ghostty
+          key: ghostty-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/bootstrap.sh', 'scripts/apply-ghostty-patches.sh', 'patches/*') }}
+      - name: Build the Release app
+        env:
+          SHORT_VERSION: ${{ needs.version.outputs.short }}
+        run: |
+          xcodebuild -version
+          CONFIGURATION=Release ./scripts/build.sh \
+              MARKETING_VERSION="$SHORT_VERSION" \
+              CURRENT_PROJECT_VERSION="$GITHUB_RUN_NUMBER"
+      - name: Import the Developer ID certificate
+        if: env.MACOS_CERTIFICATE != ''
+        env:
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          set -eu
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          PASSWORD=$(uuidgen)
+          security create-keychain -p "$PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 3600 "$KEYCHAIN"
+          security unlock-keychain -p "$PASSWORD" "$KEYCHAIN"
+          printf '%s' "$MACOS_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security import "$RUNNER_TEMP/certificate.p12" -k "$KEYCHAIN" \
+              -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          rm -f "$RUNNER_TEMP/certificate.p12"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$PASSWORD" "$KEYCHAIN" >/dev/null
+          # shellcheck disable=SC2046 # The existing keychain list must split.
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+      - name: Package the app
+        env:
+          ILLOGICAL_SIGN_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: ./scripts/package-macos.sh
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos-arm64
+          path: |
+            .build/release/*.dmg
+            .build/release/*.zip
+          if-no-files-found: error
+
+  linux:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            arch: x86_64
+          - runner: ubuntu-22.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    env:
+      ILLOGICAL_VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: service/go.mod
+          cache-dependency-path: service/go.sum
+      - name: Install pkg-config
+        run: command -v pkg-config >/dev/null || { sudo apt-get update && sudo apt-get install -y pkg-config; }
+      - name: Restore the pinned terminal library
+        uses: actions/cache@v6
+        with:
+          path: .build/ghostty
+          key: ghostty-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/bootstrap.sh', 'scripts/apply-ghostty-patches.sh', 'patches/*') }}
+      - name: Package the service and CLI
+        run: ./scripts/package-linux.sh
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux-${{ matrix.arch }}
+          path: .build/release/*.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: [version, macos, linux]
+    if: needs.version.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Record the checksums
+        working-directory: artifacts
+        run: sha256sum ./*.dmg ./*.zip ./*.tar.gz > SHA256SUMS
+      - name: Publish the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -eu
+          cat > notes.md <<NOTES
+          ## Downloads
+
+          - \`illogical-$VERSION-macos-arm64.dmg\` - the macOS app for Apple Silicon,
+            macOS 15 or later. Open the image and drag illogical to Applications.
+            The bundled \`illogical\` command lives at
+            \`/Applications/illogical.app/Contents/Resources/bin/illogical\`.
+          - \`illogical-$VERSION-macos-arm64.zip\` - the same app for scripted installs.
+          - \`illogical-service-$VERSION-linux-x86_64.tar.gz\` and
+            \`illogical-service-$VERSION-linux-aarch64.tar.gz\` - the terminal service
+            and CLI for remote hosts, glibc 2.34 or newer. Install with
+            \`sudo install -m755 bin/illogical /usr/local/bin/illogical\`.
+          - \`SHA256SUMS\` - checksums for every file above.
+
+          Verify a download with \`shasum -a 256 -c SHA256SUMS --ignore-missing\`.
+
+          Builds made without a Developer ID certificate are signed ad hoc and are
+          not notarized. If macOS refuses to open such a build, clear its download
+          quarantine with
+          \`xattr -dr com.apple.quarantine /Applications/illogical.app\`.
+          NOTES
+          if [ "$GITHUB_REF_TYPE" = tag ]; then TAG=$GITHUB_REF_NAME; else TAG=v$VERSION; fi
+          gh release create "$TAG" artifacts/* --draft --target "$GITHUB_SHA" \
+              --title "illogical $VERSION" --notes-file notes.md --generate-notes
