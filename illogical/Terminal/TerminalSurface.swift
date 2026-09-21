@@ -108,6 +108,7 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
         renderer = MetalTerminalRenderer(engine: engine, view: metal)
         LaunchMetrics.mark("rendererInitEnd")
         metal.onDisplayEnvironmentChange = { [weak self] in
+            self?.needsLayout = true
             self?.renderer?.requestDraw()
             self?.requestKeyboardFocus()
             self?.updateCursorBlink()
@@ -147,6 +148,7 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
         metal.onDisplayEnvironmentChange = nil
         NotificationCenter.default.removeObserver(self, name: NSWindow.didChangeOcclusionStateNotification, object: nil)
         NotificationCenter.default.removeObserver(self, name: NSWindow.didChangeScreenNotification, object: nil)
+        NotificationCenter.default.removeObserver(self, name: NSWindow.didChangeBackingPropertiesNotification, object: nil)
         NotificationCenter.default.removeObserver(self, name: NSWindow.didBecomeKeyNotification, object: nil)
         NotificationCenter.default.removeObserver(self, name: NSWindow.didResignKeyNotification, object: nil)
     }
@@ -155,14 +157,17 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
         super.viewDidMoveToWindow()
         NotificationCenter.default.removeObserver(self, name: NSWindow.didChangeOcclusionStateNotification, object: nil)
         NotificationCenter.default.removeObserver(self, name: NSWindow.didChangeScreenNotification, object: nil)
+        NotificationCenter.default.removeObserver(self, name: NSWindow.didChangeBackingPropertiesNotification, object: nil)
         NotificationCenter.default.removeObserver(self, name: NSWindow.didBecomeKeyNotification, object: nil)
         NotificationCenter.default.removeObserver(self, name: NSWindow.didResignKeyNotification, object: nil)
         if let window {
             NotificationCenter.default.addObserver(self, selector: #selector(displayEnvironmentChanged(_:)), name: NSWindow.didChangeOcclusionStateNotification, object: window)
             NotificationCenter.default.addObserver(self, selector: #selector(displayEnvironmentChanged(_:)), name: NSWindow.didChangeScreenNotification, object: window)
+            NotificationCenter.default.addObserver(self, selector: #selector(displayEnvironmentChanged(_:)), name: NSWindow.didChangeBackingPropertiesNotification, object: window)
             NotificationCenter.default.addObserver(self, selector: #selector(windowBecameKey(_:)), name: NSWindow.didBecomeKeyNotification, object: window)
             NotificationCenter.default.addObserver(self, selector: #selector(displayEnvironmentChanged(_:)), name: NSWindow.didResignKeyNotification, object: window)
         }
+        needsLayout = true
         requestKeyboardFocus()
         renderer?.requestDraw()
         updateCursorBlink()
@@ -191,6 +196,7 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
     override func viewDidUnhide() { super.viewDidUnhide();updateCursorBlink();renderer?.requestDraw() }
     override func viewDidHide() { super.viewDidHide();updateCursorBlink();renderer?.requestDraw() }
     @objc private func displayEnvironmentChanged(_ notification: Notification) {
+        needsLayout = true
         updateCursorBlink();renderer?.requestDraw()
     }
 
@@ -234,15 +240,19 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
     }
 
     override func layout() {
-        super.layout();metal.frame = bounds;scrollbar.frame = NSRect(x:bounds.width-11,y:0,width:11,height:bounds.height)
+        super.layout()
+        // Fractional split positions must not stretch the drawable or place
+        // every glyph between physical pixels during compositing.
+        metal.frame = backingAlignedRect(bounds, options: .alignAllEdgesNearest)
+        scrollbar.frame = NSRect(x:bounds.width-11,y:0,width:11,height:bounds.height)
         copyFeedback.frame = bounds
         if let cell = renderer?.cell, cell != reportedCellSize {
             reportedCellSize = cell
             DispatchQueue.main.async { [weak self] in self?.onCellSize(cell) }
         }
         if interactive, let cell=renderer?.cell {
-            let cols=UInt16(max(2,min(1000,Int((bounds.width-16)/cell.width))))
-            let rows=UInt16(max(1,min(1000,Int((bounds.height-16)/cell.height))))
+            let cols=UInt16(max(2,min(1000,Int((metal.bounds.width-16)/cell.width))))
+            let rows=UInt16(max(1,min(1000,Int((metal.bounds.height-16)/cell.height))))
             let scale=window?.backingScaleFactor ?? 2
             engine.requestResize(columns:cols,rows:rows,cellWidth:UInt32(cell.width*scale),cellHeight:UInt32(cell.height*scale))
         }
@@ -354,14 +364,14 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
     func characterIndex(for point:NSPoint)->Int{0}
     func firstRect(forCharacterRange range:NSRange,actualRange:NSRangePointer?)->NSRect{
         guard let window,let cell=renderer?.cell else{return .zero}
-        let rect=NSRect(x:8+CGFloat(frameInfo.cursorColumn)*cell.width,y:8+CGFloat(frameInfo.cursorRow)*cell.height,width:cell.width,height:cell.height)
+        let rect=NSRect(x:metal.frame.minX+8+CGFloat(frameInfo.cursorColumn)*cell.width,y:metal.frame.minY+8+CGFloat(frameInfo.cursorRow)*cell.height,width:cell.width,height:cell.height)
         return window.convertToScreen(convert(rect,to:nil))
     }
     private func updateComposition(){
         guard let cell=renderer?.cell else{return}
         composition.isHidden = !hasMarkedText();composition.stringValue=marked.string;composition.font=renderer?.font
         composition.textColor=NSColor(hex:engine.theme.foreground);composition.backgroundColor=NSColor(hex:engine.theme.background)
-        composition.frame=NSRect(x:8+CGFloat(frameInfo.cursorColumn)*cell.width,y:8+CGFloat(frameInfo.cursorRow)*cell.height,width:max(cell.width,CGFloat(marked.length+1)*cell.width),height:cell.height)
+        composition.frame=NSRect(x:metal.frame.minX+8+CGFloat(frameInfo.cursorColumn)*cell.width,y:metal.frame.minY+8+CGFloat(frameInfo.cursorRow)*cell.height,width:max(cell.width,CGFloat(marked.length+1)*cell.width),height:cell.height)
     }
 
     @objc func copy(_ sender: Any?) {
@@ -373,7 +383,7 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
     @objc func paste(_ sender: Any?) { if let text=pasteboard.string(forType:.string){engine.paste(text)} }
     @objc override func selectAll(_ sender: Any?) { engine.selectAll() }
 
-    private func localPoint(_ event:NSEvent)->NSPoint{let p=convert(event.locationInWindow,from:nil);return NSPoint(x:max(0,p.x-8),y:max(0,p.y-8))}
+    private func localPoint(_ event:NSEvent)->NSPoint{let p=convert(event.locationInWindow,from:nil);return NSPoint(x:max(0,p.x-metal.frame.minX-8),y:max(0,p.y-metal.frame.minY-8))}
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if let mouseTracking { removeTrackingArea(mouseTracking) }
@@ -460,7 +470,7 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
                 let selected = column < Int(frame.columns) && (cells[row * Int(frame.columns) + column].flags & 8) != 0
                 if selected && start == nil { start = column }
                 if !selected, let first = start {
-                    rects.append(CGRect(x: 8 + CGFloat(first) * cellSize.width, y: 8 + CGFloat(row) * cellSize.height,
+                    rects.append(CGRect(x: metal.frame.minX + 8 + CGFloat(first) * cellSize.width, y: metal.frame.minY + 8 + CGFloat(row) * cellSize.height,
                                         width: CGFloat(column - first) * cellSize.width, height: cellSize.height))
                     start = nil
                 }

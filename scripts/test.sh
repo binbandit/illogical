@@ -31,6 +31,9 @@ printf '\nConnection delivery, backpressure, and JSON framing checks\n'
 
 printf '\nFont, cell geometry, and Metal rendering checks\n'
 ./scripts/test-rendering.sh
+./scripts/test-font-rasterization.sh
+./scripts/test-display-text.sh
+./scripts/test-display.sh
 ./scripts/test-text-runs.sh
 ./scripts/test-graphics.sh
 

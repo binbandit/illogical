@@ -10,6 +10,7 @@ vertex Raster terminal_vertex(uint v [[vertex_id]], uint i [[instance_id]], cons
 }
 fragment float4 terminal_fragment(Raster in [[stage_in]], texture2d<float> atlas [[texture(0)]]) {
     constexpr sampler sample(coord::normalized, address::clamp_to_edge, filter::linear);
+    constexpr sampler glyphSample(coord::normalized, address::clamp_to_edge, filter::nearest);
     if (in.textured == 0) return in.color;
     if (in.textured == 8) {
         // Kitty pixel payloads contain straight alpha. The window uses
@@ -17,6 +18,9 @@ fragment float4 terminal_fragment(Raster in [[stage_in]], texture2d<float> atlas
         float4 pixel = atlas.sample(sample, in.uv);
         return float4(pixel.rgb * pixel.a, pixel.a);
     }
+    // Overview previews scale the atlas. Ordinary terminal glyphs already
+    // contain CoreText coverage and, like Ghostty, sample exact atlas texels.
+    if (in.textured == 9) return atlas.sample(sample, in.uv) * in.color;
     if (in.textured >= 5) {
         float coverage;
         if (in.textured == 5) {
@@ -41,5 +45,5 @@ fragment float4 terminal_fragment(Raster in [[stage_in]], texture2d<float> atlas
         uint threshold = ((pixel.x & 1) << 1) | ((pixel.x ^ pixel.y) & 1);
         return threshold < in.textured - 1 ? in.color : float4(0);
     }
-    return atlas.sample(sample, in.uv) * in.color;
+    return atlas.sample(glyphSample, in.uv) * in.color;
 }

@@ -99,7 +99,13 @@ final class TerminalFontRasterizer {
             return Bitmap(bytes: bytes, width: width, height: height, padding: padding, colored: false)
         }
         let font = resolvedFont(for: key.text, bold: key.bold, italic: key.italic)
-        let shaped = key.clusters.isEmpty ? nil : TerminalTextRuns.shape(text: key.text, clusters: key.clusters, font: font, cellWidth: cell.width * scale)
+        var clusters = key.clusters
+        if clusters.isEmpty && key.width > 1 && key.text.utf8.count == key.width && key.text.utf8.allSatisfy({ $0 < 0x80 }) {
+            // Keep operator ligatures on the same pixel grid as individual cells.
+            // Stretching an entire CTLine to the rounded cell span distorts every glyph.
+            clusters = (0..<key.width).map { .init(utf16Offset: $0, utf16Count: 1, column: $0, width: 1) }
+        }
+        let shaped = clusters.isEmpty ? nil : TerminalTextRuns.shape(text: key.text, clusters: clusters, font: font, cellWidth: cell.width * scale)
         let attributed = NSAttributedString(string: key.text, attributes: [
             NSAttributedString.Key(kCTFontAttributeName as String): font,
             NSAttributedString.Key(kCTForegroundColorFromContextAttributeName as String): true
@@ -152,11 +158,6 @@ final class TerminalFontRasterizer {
                     : min(CGFloat(height) - bounds.maxY * factor, max(-bounds.minY * factor, baseline))
                 context.translateBy(x: originX, y: originY)
                 context.scaleBy(x: factor, y: factor)
-                context.textPosition = .zero
-            } else if key.width > 1 && key.text.utf8.count == key.width {
-                let advance = CTLineGetTypographicBounds(line, nil, nil, nil)
-                context.translateBy(x: CGFloat(padding), y: baseline)
-                context.scaleBy(x: advance > 0 ? CGFloat(cellWidth) / advance : 1, y: 1)
                 context.textPosition = .zero
             } else { context.textPosition = CGPoint(x: CGFloat(padding), y: baseline) }
             CTLineDraw(line, context)

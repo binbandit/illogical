@@ -163,7 +163,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
     private var contrastTarget: UInt32?
     private var contrastMinimum: Double?
     private var fontCache: NSFont?
-    private var cellCache: NSSize?
+    private var cellCache: (scale: CGFloat, size: NSSize)?
     private var displayedGraphics = TerminalGraphicsState()
     private var graphicsNamespace: String?
     private var imageDraws: [(quad: TerminalQuad, texture: MTLTexture, z: Int32)] = []
@@ -180,11 +180,15 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         return resolved
     }
     var cell: NSSize {
-        if let cached = cellCache { return cached }
+        let scale = view?.window?.backingScaleFactor ?? 2
+        if let cached = cellCache, cached.scale == scale { return cached.size }
         let f = font
         let width = ("M" as NSString).size(withAttributes: [.font: f]).width
-        let result = NSSize(width: ceil(width * 2) / 2, height: ceil(f.ascender - f.descender + f.leading + 3))
-        cellCache = result
+        // Ghostty rounds grid metrics in device pixels. Fixed half-point cells
+        // put alternate glyphs between pixels on a 1x external display.
+        let result = NSSize(width: max(1, round(width * scale)) / scale,
+                            height: max(1, round((f.ascender - f.descender + f.leading + 3) * scale)) / scale)
+        cellCache = (scale, result)
         return result
     }
 
@@ -498,7 +502,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                 }
                 if let entry = atlas.glyph(key) {
                     let glyph = entry.rect
-                    foregrounds.append(TerminalQuad(rect:SIMD4(Float(rect.minX-CGFloat(entry.padding)/scale*fit),Float(rect.minY),Float(glyph.width/scale*fit),Float(glyph.height/scale*fit)),uv:SIMD4(Float(glyph.minX/2048),Float(glyph.minY/2048),Float(glyph.width/2048),Float(glyph.height/2048)),color:entry.colored ? SIMD4(repeating:1) : Self.rgba(fg),textured:1))
+                    foregrounds.append(TerminalQuad(rect:SIMD4(Float(rect.minX-CGFloat(entry.padding)/scale*fit),Float(rect.minY),Float(glyph.width/scale*fit),Float(glyph.height/scale*fit)),uv:SIMD4(Float(glyph.minX/2048),Float(glyph.minY/2048),Float(glyph.width/2048),Float(glyph.height/2048)),color:entry.colored ? SIMD4(repeating:1) : Self.rgba(fg),textured:interactive ? 1 : 9))
                 }
             }
             if cellData.flags & 52 != 0 { decorations(cellData, rect: rect, foreground: fg, span: span) }
@@ -535,7 +539,9 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         backgrounds.withUnsafeBytes { if let base = $0.baseAddress { memcpy(buffer.contents(), base, $0.count) } }
         foregrounds.withUnsafeBytes { if let base = $0.baseAddress { memcpy(buffer.contents().advanced(by: backgrounds.count * MemoryLayout<TerminalQuad>.stride), base, $0.count) } }
         encoder.setRenderPipelineState(pipeline);encoder.setVertexBuffer(buffer,offset:0,index:0)
-        var viewport = SIMD2(Float(view.bounds.width),Float(view.bounds.height));encoder.setVertexBytes(&viewport,length:MemoryLayout<SIMD2<Float>>.stride,index:1)
+        // Drawable dimensions are integral. Using fractional point bounds here
+        // stretches every glyph slightly when a split lands between pixels.
+        var viewport = SIMD2(Float(CGFloat(texture.width) / scale),Float(CGFloat(texture.height) / scale));encoder.setVertexBytes(&viewport,length:MemoryLayout<SIMD2<Float>>.stride,index:1)
         encoder.setFragmentTexture(atlas.texture,index:0)
         func drawImages(where predicate: (Int32) -> Bool) {
             for draw in imageDraws where predicate(draw.z) {

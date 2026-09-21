@@ -8,10 +8,18 @@ The native client uses libghostty-vt for terminal state, Unicode cell widths, se
 - Private-use Nerd Font characters first use the selected face when it contains the character, then an installed Symbols Nerd Font face, then the bundled OFL-licensed JetBrains Mono Nerd Font. The bundled fallback is opened privately and lazily, without installing fonts or enumerating the user's entire font collection at launch.
 - Nerd symbols can occupy spare space in the following blank cell. Adjacent icons retain a single-cell constraint. Common Powerline separators, box drawing, and Braille are drawn from the cell geometry; block elements are direct Metal rectangles. This avoids baseline gaps in terminal graphics such as DOOM Fire's upper-half blocks.
 - Graphics elements retain their requested colors, including when minimum text contrast correction is enabled. Text contrast follows the chosen app preference.
-- OpenType features and variable font axes are part of the font and atlas cache identity. Adjacent code operators share a cached shaped run, which enables code-font ligatures. ASCII operator runs are fitted to their assigned terminal cells.
+- OpenType features and variable font axes are part of the font and atlas cache identity. Adjacent code operators share a cached shaped run, which enables code-font ligatures. Operator glyph origins follow the terminal grid without stretching their outlines; genuine font ligatures remain enabled.
 - Font thickening uses CoreText smoothing in an alpha-only linear-gray context, including its configurable 0–255 strength, following Ghostty's macOS rasterizer. Monochrome coverage is tinted in Metal, so changing foreground color does not create another bitmap for the same glyph.
 - The block cursor uses an opaque cursor background and inverted text; wide characters receive a wide cursor. Unfocused and explicitly hollow cursors use outlines.
 - Presentation follows the current display's native refresh cadence, coalescing terminal-state invalidations without discarding any PTY bytes. A private serial queue acquires Metal drawables, so a saturated swap queue cannot block the main thread's terminal parser. At most one drawable acquisition and three GPU-owned buffers exist per surface. Unchanged surfaces submit no GPU frames and pause their display link after a 100 ms grace period, avoiding display-link thread churn between output bursts. Fully hidden surfaces pause immediately. The Metal child's attachment, visibility, and screen changes wake it with the latest state, including when it joins an already visible window.
+
+## Display clarity
+
+Grid metrics round to physical pixels at the current display scale, following the pinned Ghostty `src/font/Metrics.zig` approach. Moving between 1x and 2x displays invalidates the metric cache and updates the terminal's pixel geometry while idle. The Metal child aligns its origin and edges through AppKit backing conversion, and the shader viewport uses the actual drawable size so fractional split bounds cannot stretch the entire terminal image.
+
+Ordinary glyphs use nearest-texel atlas sampling, as in Ghostty's `src/renderer/shaders/shaders.metal`. CoreText still supplies antialiased coverage; nearest sampling prevents a second interpolation from softening it. Scaled tab previews and images retain linear sampling. Grouped ASCII operators use the existing CoreText grid shaper instead of horizontally scaling a complete line.
+
+The original code reproduced alternating blurred letters on 1x displays and fractional-bounds softening at both scales. [Clarity evidence and limits](font-clarity.md) records the actual Metal readback and AppKit lifecycle checks.
 
 ## Verification
 
