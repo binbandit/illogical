@@ -92,9 +92,9 @@ Related references: [CLI help at 7:17](https://x.com/mitchellh/status/2099622049
 
 **P03, September.** The author's paired images isolate the effect on a light background. Some foreground colors and TUI elements are difficult to distinguish before correction; their contrast improves in the second image. Layout is essentially unchanged.
 
-![Automatic contrast correction off](frames/contrast-off.jpg)
+[Automatic contrast correction off, original source image](https://pbs.twimg.com/media/HScI8d0W4AAaIkn?format=jpg&name=medium)
 
-![Automatic contrast correction on](frames/contrast-on.jpg)
+[Automatic contrast correction on, original source image](https://pbs.twimg.com/media/HScI9EmXoAEz8oB?format=jpg&name=medium)
 
 The exact transform cannot be recovered from two screenshots. The post supplies algorithm direction: OKLab, theme-aware hue adjustment, contrast checking, and caching. It does not supply complete thresholds or a published implementation.
 
