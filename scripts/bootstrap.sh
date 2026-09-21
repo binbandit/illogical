@@ -22,7 +22,7 @@ case "$(uname -s) $(uname -m)" in
         ZIG_SHA=ea4b09bfb22ec6f6c6ceac57ab63efb6b46e17ab08d21f69f3a48b38e1534f17
         ZIG_TARGET=-Dtarget=aarch64-linux-gnu.2.34
         ;;
-    'Darwin '*) echo 'This build currently supports Apple Silicon. Intel needs a matching Ghostty library.' >&2; exit 1 ;;
+    'Darwin '*) echo 'The app is built for Apple Silicon only.' >&2; exit 1 ;;
     *) echo 'Supported hosts are Apple Silicon macOS and x86_64 or aarch64 Linux.' >&2; exit 1 ;;
 esac
 command -v go >/dev/null || { echo 'Install Go 1.27.1 or newer first.' >&2; exit 1; }

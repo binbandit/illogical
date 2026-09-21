@@ -70,9 +70,10 @@ Debian 12, and RHEL 9.
 
 ## Known limits
 
-Intel Macs are not built; the bootstrap has no matching Ghostty library for
-them. The workflow does not run `scripts/test.sh`, which needs a Metal device
-and real pseudo-terminals, so releases carry whatever was validated on the
-maintainer's machine. Linux artifacts are built on the GitHub-hosted
-`ubuntu-22.04` and `ubuntu-22.04-arm` runners; an Arm runner is available
-because this repository is public.
+The app ships for Apple Silicon only, which is the supported platform; the
+build pins `ARCHS=arm64` so a Release configuration never adds the x86_64 slice
+the pinned terminal library cannot link. The workflow does not run
+`scripts/test.sh`, which needs a Metal device and real pseudo-terminals, so
+releases carry whatever was validated on the maintainer's machine. Linux
+artifacts are built on the GitHub-hosted `ubuntu-22.04` and `ubuntu-22.04-arm`
+runners; an Arm runner is available because this repository is public.
