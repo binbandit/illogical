@@ -59,9 +59,12 @@ void il_terminal_restore_view(ILTerminal *terminal, const ILTerminalViewState *s
 size_t il_terminal_key(ILTerminal *terminal, uint16_t keycode, uint16_t modifiers, uint16_t consumed, int action, const char *text, size_t textLength, uint32_t unshifted, char *out, size_t capacity);
 size_t il_terminal_mouse(ILTerminal *terminal, int action, int button, uint16_t modifiers, float x, float y, float cellWidth, float cellHeight, char *out, size_t capacity);
 bool il_terminal_mouse_reporting(ILTerminal *terminal);
+size_t il_terminal_alternate_scroll(ILTerminal *terminal, bool up, char *out, size_t capacity);
 size_t il_terminal_focus(ILTerminal *terminal, bool focused, char *out, size_t capacity);
 size_t il_terminal_paste(ILTerminal *terminal, char *text, size_t length, char *out, size_t capacity);
 void il_terminal_select(ILTerminal *terminal, int action, uint16_t column, uint16_t row, float x, float y, float cellWidth, float cellHeight, uint64_t timeNanos, bool rectangle);
+bool il_terminal_selection_autoscroll(ILTerminal *terminal);
+void il_terminal_selection_cancel(ILTerminal *terminal);
 void il_terminal_select_all(ILTerminal *terminal);
 char *il_terminal_copy(ILTerminal *terminal, size_t *length);
 void il_bytes_free(void *bytes);

@@ -47,6 +47,24 @@ struct TerminalSurfaceInputTests {
         container.addSubview(surface)
         RunLoop.main.run(until:Date(timeIntervalSinceNow:0.02))
         precondition(window.firstResponder === surface, "Terminal focus requested before attachment must be restored when mounted")
+        func tabEvent(_ type: NSEvent.EventType, _ modifiers: NSEvent.ModifierFlags) -> NSEvent {
+            NSEvent.keyEvent(with: type, location: .zero, modifierFlags: modifiers, timestamp: 2,
+                             windowNumber: window.windowNumber, context: nil, characters: "\t",
+                             charactersIgnoringModifiers: "\t", isARepeat: false, keyCode: 48)!
+        }
+        for modifiers: NSEvent.ModifierFlags in [.control, [.control, .shift], [.control, .capsLock]] {
+            precondition(!surface.performKeyEquivalent(with: tabEvent(.keyDown, modifiers)),
+                         "Control-Tab navigation must reach the application's menus")
+            surface.keyUp(with: tabEvent(.keyUp, modifiers))
+            precondition(output.isEmpty, "Menu-owned Control-Tab must not emit terminal input or an unmatched Kitty release")
+        }
+        precondition(surface.performKeyEquivalent(with: tabEvent(.keyDown, [.control, .option])),
+                     "Control-Option-Tab must retain its terminal meaning")
+        precondition(output == Data("\u{1b}[9;7u".utf8))
+        output.removeAll()
+        surface.keyUp(with: tabEvent(.keyUp, [.control, .option]))
+        precondition(output == Data("\u{1b}[9;7:3u".utf8), "Forwarded Control-Option-Tab retains its matching Kitty release")
+        output.removeAll()
         window.sendEvent(event(.keyDown, .control))
         precondition(output == Data("\u{1b}[99;5u".utf8), "The first Control-C must reach the mounted terminal without a click")
         output.removeAll()
@@ -55,6 +73,8 @@ struct TerminalSurfaceInputTests {
         container.addSubview(surface)
         RunLoop.main.run(until:Date(timeIntervalSinceNow:0.02))
         precondition(window.firstResponder !== surface, "An inactive terminal must not take attachment focus")
+        precondition(!surface.performKeyEquivalent(with: event(.keyDown, .control)) && output.isEmpty,
+                     "A terminal that is not first responder cannot intercept Control keys")
         surface.wantsKeyboardFocus = true
         surface.wantsKeyboardFocus = false
         RunLoop.main.run(until:Date(timeIntervalSinceNow:0.02))
@@ -66,6 +86,8 @@ struct TerminalSurfaceInputTests {
         surface.removeFromSuperview();container.addSubview(surface)
         RunLoop.main.run(until:Date(timeIntervalSinceNow:0.02))
         precondition(window.firstResponder === editor, "Attachment focus must preserve active text editing")
+        precondition(!surface.performKeyEquivalent(with: tabEvent(.keyDown, [.control, .option])) && output.isEmpty,
+                     "Active text editors retain Control-Option-Tab ownership")
         surface.wantsKeyboardFocus = false
         surface.removeFromSuperview();search.removeFromSuperview();window.makeFirstResponder(nil)
         let metal = TerminalMetalView(frame:container.bounds,device:nil)
@@ -88,6 +110,7 @@ struct TerminalSurfaceInputTests {
         metal.onDisplayEnvironmentChange = nil
         window.contentView = nil
         print("Native input surface: menu key releases, matching Kitty releases, and IME Unicode commit passed.")
+        print("Tab navigation input: Control-Tab yields to menus; Control-Option-Tab and Control-C still reach the focused terminal.")
         print("Terminal focus: delayed mount, first Control-C, inactive panes, palette cancellation, and active editor preservation passed.")
         print("Metal surface lifecycle: child attachment, deferred first-frame wake, hide/reveal, and reattachment passed.")
     }

@@ -72,7 +72,7 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
     var renderer: MetalTerminalRenderer?
     var interactive = true {
         didSet {
-            if oldValue && !interactive { reportTerminalFocus(false) }
+            if oldValue && !interactive { reportTerminalFocus(false);cancelSelectionDrag() }
             if interactive != oldValue { updateCursorBlink();updateTrackingAreas() }
         }
     }
@@ -91,7 +91,11 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
     private var composingKeyReleases: Set<UInt16> = []
     private var forwardedKeyPresses: Set<UInt16> = []
     private var markedSelection = NSRange(location: 0, length: 0)
-    private var scrollRemainder: CGFloat = 0
+    private var scrollRemainderX: CGFloat = 0
+    private var scrollRemainderY: CGFloat = 0
+    private var scrollWasPrecise: Bool?
+    private var selectionDragEvent: NSEvent?
+    private(set) var selectionAutoscrollTimer: Timer?
     private(set) var cursorBlinkTimer: Timer?
     private var detached = false
     private var touchStart: CGFloat?
@@ -108,6 +112,7 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
         renderer = MetalTerminalRenderer(engine: engine, view: metal)
         LaunchMetrics.mark("rendererInitEnd")
         metal.onDisplayEnvironmentChange = { [weak self] in
+            if self?.canAutoscrollSelection != true { self?.cancelSelectionDrag() }
             self?.needsLayout = true
             self?.renderer?.requestDraw()
             self?.requestKeyboardFocus()
@@ -124,7 +129,7 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-    isolated deinit { cursorBlinkTimer?.invalidate();feedbackDismissal?.cancel() }
+    isolated deinit { cursorBlinkTimer?.invalidate();selectionAutoscrollTimer?.invalidate();feedbackDismissal?.cancel() }
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { interactive }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
@@ -134,6 +139,7 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
         return true
     }
     override func resignFirstResponder() -> Bool {
+        cancelSelectionDrag()
         forwardedKeyPresses.removeAll(keepingCapacity: true)
         composingKeyReleases.removeAll(keepingCapacity: true)
         renderer?.focused = false;updateCursorBlink();renderer?.requestDraw();return true
@@ -141,6 +147,7 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
     func detach() {
         wantsKeyboardFocus = false
         detached = true
+        cancelSelectionDrag()
         reportTerminalFocus(false)
         feedbackDismissal?.cancel();feedbackDismissal = nil
         cursorBlinkTimer?.invalidate();cursorBlinkTimer = nil
@@ -155,6 +162,7 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        if window == nil { cancelSelectionDrag() }
         NotificationCenter.default.removeObserver(self, name: NSWindow.didChangeOcclusionStateNotification, object: nil)
         NotificationCenter.default.removeObserver(self, name: NSWindow.didChangeScreenNotification, object: nil)
         NotificationCenter.default.removeObserver(self, name: NSWindow.didChangeBackingPropertiesNotification, object: nil)
@@ -194,9 +202,10 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
     }
 
     override func viewDidUnhide() { super.viewDidUnhide();updateCursorBlink();renderer?.requestDraw() }
-    override func viewDidHide() { super.viewDidHide();updateCursorBlink();renderer?.requestDraw() }
+    override func viewDidHide() { super.viewDidHide();cancelSelectionDrag();updateCursorBlink();renderer?.requestDraw() }
     @objc private func displayEnvironmentChanged(_ notification: Notification) {
         needsLayout = true
+        if notification.name == NSWindow.didResignKeyNotification || window?.occlusionState.contains(.visible) != true { cancelSelectionDrag() }
         updateCursorBlink();renderer?.requestDraw()
     }
 
@@ -322,6 +331,8 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         guard interactive, window?.firstResponder === self, event.type == .keyDown,
               event.modifierFlags.contains(.control), !event.modifierFlags.contains(.command) else { return false }
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask).subtracting([.capsLock, .numericPad])
+        if event.keyCode == 48 && (modifiers == .control || modifiers == [.control, .shift]) { return false }
         keyDown(with: event)
         return true
     }
@@ -383,7 +394,14 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
     @objc func paste(_ sender: Any?) { if let text=pasteboard.string(forType:.string){engine.paste(text)} }
     @objc override func selectAll(_ sender: Any?) { engine.selectAll() }
 
-    private func localPoint(_ event:NSEvent)->NSPoint{let p=convert(event.locationInWindow,from:nil);return NSPoint(x:max(0,p.x-metal.frame.minX-8),y:max(0,p.y-metal.frame.minY-8))}
+    private func selectionPoint(_ event: NSEvent) -> NSPoint {
+        let point = convert(event.locationInWindow, from: nil)
+        return NSPoint(x: point.x - metal.frame.minX - 8, y: point.y - metal.frame.minY - 8)
+    }
+    private func localPoint(_ event: NSEvent) -> NSPoint {
+        let point = selectionPoint(event)
+        return NSPoint(x: max(0, point.x), y: max(0, point.y))
+    }
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if let mouseTracking { removeTrackingArea(mouseTracking) }
@@ -416,32 +434,94 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
     override func otherMouseUp(with event: NSEvent) { if !sendMouse(event, action: 1, button: extraMouseButton(event)) { super.otherMouseUp(with: event) } }
     override func otherMouseDragged(with event: NSEvent) { if !sendMouse(event, action: 2, button: extraMouseButton(event)) { super.otherMouseDragged(with: event) } }
     override func mouseDown(with event:NSEvent){
+        stopSelectionAutoscroll();selectionDragEvent = nil
         guard interactive,let cell=renderer?.cell else{return};window?.makeFirstResponder(self);onFocus()
         let point=localPoint(event);openedLinkOnMouseDown = false
-        if event.modifierFlags.contains(.command),let url=engine.link(at:point,cell:cell){openedLinkOnMouseDown = true;onLink(url);openURL(url);return}
-        if !event.modifierFlags.contains(.shift),terminalMouse(event,action:0,button:1,point:point,cell:cell){return}
-        engine.select(event,action:0,point:point,cell:cell)
+        if event.modifierFlags.contains(.command),let url=engine.link(at:point,cell:cell){cancelSelectionDrag();openedLinkOnMouseDown = true;onLink(url);openURL(url);return}
+        if !event.modifierFlags.contains(.shift),terminalMouse(event,action:0,button:1,point:point,cell:cell){cancelSelectionDrag();return}
+        engine.select(event,action:0,point:selectionPoint(event),cell:cell)
+        selectionDragEvent = event
     }
     override func mouseDragged(with event:NSEvent){
         guard interactive,let cell=renderer?.cell else{return};let point=localPoint(event)
-        if !event.modifierFlags.contains(.shift),terminalMouse(event,action:2,button:1,point:point,cell:cell){return}
-        engine.select(event,action:1,point:point,cell:cell)
+        if !event.modifierFlags.contains(.shift),terminalMouse(event,action:2,button:1,point:point,cell:cell){cancelSelectionDrag();return}
+        guard selectionDragEvent != nil else { return }
+        selectionDragEvent = event
+        engine.select(event,action:1,point:selectionPoint(event),cell:cell)
+        updateSelectionAutoscroll()
     }
     override func mouseUp(with event:NSEvent){
+        stopSelectionAutoscroll();selectionDragEvent = nil
         if openedLinkOnMouseDown { openedLinkOnMouseDown = false;return }
         guard interactive,let cell=renderer?.cell else{return};let point=localPoint(event)
-        if !event.modifierFlags.contains(.shift),terminalMouse(event,action:1,button:1,point:point,cell:cell){return}
-        engine.select(event,action:2,point:point,cell:cell)
+        if !event.modifierFlags.contains(.shift),terminalMouse(event,action:1,button:1,point:point,cell:cell){cancelSelectionDrag();return}
+        engine.select(event,action:2,point:selectionPoint(event),cell:cell)
         if copyOnSelection { copy(nil) }
     }
     override func scrollWheel(with event:NSEvent){
         guard interactive,let cell=renderer?.cell else{return}
-        scrollRemainder += event.scrollingDeltaY/(event.hasPreciseScrollingDeltas ? cell.height : 1)
-        let rows=Int(scrollRemainder);guard rows != 0 else{return};scrollRemainder -= CGFloat(rows)
+        let precise = event.hasPreciseScrollingDeltas
+        if scrollWasPrecise != precise || event.phase == .began {
+            scrollRemainderX = 0;scrollRemainderY = 0;scrollWasPrecise = precise
+        }
+        let rows = Self.scrollUnits(event.scrollingDeltaY, cell: cell.height, precise: precise, vertical: true, remainder: &scrollRemainderY)
+        let columns = Self.scrollUnits(event.scrollingDeltaX, cell: cell.width, precise: precise, vertical: false, remainder: &scrollRemainderX)
+        guard rows != 0 || columns != 0 else { return }
         let point=localPoint(event)
-        if !event.modifierFlags.contains(.shift),terminalMouse(event,action:0,button:rows>0 ? 4 : 5,point:point,cell:cell){
-            for _ in 1..<max(1,min(100,abs(rows))){_ = terminalMouse(event,action:0,button:rows>0 ? 4 : 5,point:point,cell:cell)}
-        }else{engine.scroll(-rows)}
+        if !event.modifierFlags.contains(.shift), il_terminal_mouse_reporting(engine.handle) {
+            for _ in 0..<min(100, abs(rows)) { _ = terminalMouse(event,action:0,button:rows>0 ? 4 : 5,point:point,cell:cell) }
+            for _ in 0..<min(100, abs(columns)) { _ = terminalMouse(event,action:0,button:columns>0 ? 6 : 7,point:point,cell:cell) }
+        } else if rows != 0, !engine.alternateScroll(rows) { engine.scroll(-rows) }
+    }
+
+    private static func scrollUnits(_ delta: CGFloat, cell: CGFloat, precise: Bool, vertical: Bool, remainder: inout CGFloat) -> Int {
+        guard delta.isFinite, delta != 0, cell > 0 else { return 0 }
+        if !precise {
+            // AppKit reports a slow physical vertical detent as 0.1. Ghostty
+            // normalizes it to one row and rounds horizontal wheel ticks.
+            let normalized = vertical ? (delta > 0 ? max(1, delta) : min(-1, delta)) : delta.rounded()
+            return Int(max(-100, min(100, normalized)))
+        }
+        remainder += max(-100, min(100, delta / cell))
+        let units = Int(remainder)
+        remainder -= CGFloat(units)
+        return units
+    }
+
+    private var canAutoscrollSelection: Bool {
+        !detached && interactive && selectionDragEvent != nil && !isHiddenOrHasHiddenAncestor
+            && !metal.isHiddenOrHasHiddenAncestor && window?.occlusionState.contains(.visible) == true
+    }
+
+    private func stopSelectionAutoscroll() {
+        selectionAutoscrollTimer?.invalidate();selectionAutoscrollTimer = nil
+    }
+
+    private func cancelSelectionDrag() {
+        stopSelectionAutoscroll();selectionDragEvent = nil;engine.cancelSelectionGesture()
+    }
+
+    private func updateSelectionAutoscroll() {
+        guard canAutoscrollSelection, engine.selectionNeedsAutoscroll else { stopSelectionAutoscroll();return }
+        guard selectionAutoscrollTimer == nil else { return }
+        // Match Ghostty's gesture timer. It only exists while a selection is
+        // held at a viewport edge and runs during AppKit event tracking too.
+        let timer = Timer(timeInterval: 0.015, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.selectionAutoscrollTick() }
+        }
+        timer.tolerance = 0.003
+        selectionAutoscrollTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func selectionAutoscrollTick() {
+        guard canAutoscrollSelection, engine.selectionNeedsAutoscroll, let event = selectionDragEvent,
+              let cell = renderer?.cell else { stopSelectionAutoscroll();return }
+        if !event.modifierFlags.contains(.shift), il_terminal_mouse_reporting(engine.handle) { cancelSelectionDrag();return }
+        let previousOffset = il_terminal_scroll_distance(engine.handle)
+        engine.select(event, action: 3, point: selectionPoint(event), cell: cell)
+        if il_terminal_scroll_distance(engine.handle) == previousOffset { stopSelectionAutoscroll() }
+        else { updateSelectionAutoscroll() }
     }
     override func menu(for event:NSEvent)->NSMenu?{
         guard interactive else{return nil};let menu=NSMenu();menu.addItem(withTitle:"Copy",action:#selector(copy(_:)),keyEquivalent:"");menu.addItem(withTitle:"Paste",action:#selector(paste(_:)),keyEquivalent:"");menu.addItem(withTitle:"Select All",action:#selector(selectAll(_:)),keyEquivalent:"");for item in menu.items{item.target=self};return menu

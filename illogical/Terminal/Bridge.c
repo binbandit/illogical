@@ -2,6 +2,8 @@
 #include <ghostty/vt.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
+#include <ctype.h>
 #include <libproc.h>
 #include <sys/time.h>
 #include <unistd.h>
@@ -191,6 +193,20 @@ int il_terminal_history(ILTerminal *t, const uint8_t *data, size_t length, bool 
 void il_terminal_feed(ILTerminal *t, const uint8_t *data, size_t length) { if (t) { ghostty_terminal_vt_write(t->terminal, data, length);t->mouseEncoderDirty=true; } }
 void il_terminal_resize(ILTerminal *t, uint16_t columns, uint16_t rows, uint32_t width, uint32_t height) { if (t) ghostty_terminal_resize(t->terminal, columns, rows, width, height); }
 static uint32_t pack(GhosttyColorRgb c) { return ((uint32_t)c.r << 16) | ((uint32_t)c.g << 8) | c.b; }
+static void base_codepoint_text(GhosttyCell raw, char text[128]) {
+    uint32_t codepoint = 0;
+    ghostty_cell_get(raw, GHOSTTY_CELL_DATA_CODEPOINT, &codepoint);
+    if (codepoint <= 0x7f) { text[0] = (char)codepoint; text[1] = 0; }
+    else if (codepoint <= 0x7ff) {
+        text[0] = 0xc0 | (codepoint >> 6); text[1] = 0x80 | (codepoint & 0x3f); text[2] = 0;
+    } else if (codepoint <= 0xffff) {
+        text[0] = 0xe0 | (codepoint >> 12); text[1] = 0x80 | ((codepoint >> 6) & 0x3f);
+        text[2] = 0x80 | (codepoint & 0x3f); text[3] = 0;
+    } else if (codepoint <= 0x10ffff) {
+        text[0] = 0xf0 | (codepoint >> 18); text[1] = 0x80 | ((codepoint >> 12) & 0x3f);
+        text[2] = 0x80 | ((codepoint >> 6) & 0x3f); text[3] = 0x80 | (codepoint & 0x3f); text[4] = 0;
+    }
+}
 uint64_t il_terminal_scroll_distance(ILTerminal *t) {
     if(!t)return 0;
     GhosttyTerminalScrollbar scrollbar={0};
@@ -364,7 +380,11 @@ bool il_terminal_frame(ILTerminal *t, ILFrame *frame) {
             cell->width=wide==GHOSTTY_CELL_WIDE_WIDE?2:(wide==GHOSTTY_CELL_WIDE_NARROW?1:0);
             if(!style.invisible && cell->width){
                 GhosttyBuffer buffer={.ptr=(uint8_t *)cell->text,.cap=sizeof(cell->text)-1};
-                if(ghostty_render_state_row_cells_get(t->cells,GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_UTF8,&buffer)==GHOSTTY_SUCCESS)cell->text[buffer.len]=0;
+                GhosttyResult result=ghostty_render_state_row_cells_get(t->cells,GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_UTF8,&buffer);
+                if(result==GHOSTTY_SUCCESS)cell->text[buffer.len]=0;
+                // Keep the renderer's per-cell memory bounded for pathological
+                // clusters. Ghostty still retains the complete text for copy.
+                else if(result==GHOSTTY_OUT_OF_SPACE)base_codepoint_text(raw,cell->text);
             }
             col++;
         }
@@ -422,16 +442,20 @@ char *il_terminal_copy(ILTerminal *t,size_t *length){
 void il_terminal_select_all(ILTerminal *t){if(!t)return;GhosttySelection selection=GHOSTTY_INIT_SIZED(GhosttySelection);if(ghostty_terminal_select_all(t->terminal,&selection)==GHOSTTY_SUCCESS)ghostty_terminal_set(t->terminal,GHOSTTY_TERMINAL_OPT_SELECTION,&selection);}
 
 void il_terminal_select(ILTerminal *t,int action,uint16_t column,uint16_t row,float x,float y,float cellWidth,float cellHeight,uint64_t timeNanos,bool rectangle){
-    if(!t)return;
+    if(!t || action<0 || action>3)return;
     GhosttyGridRef ref=GHOSTTY_INIT_SIZED(GhosttyGridRef);GhosttyPoint point={.tag=GHOSTTY_POINT_TAG_VIEWPORT,.value={.coordinate={.x=column,.y=row}}};
     if(ghostty_terminal_grid_ref(t->terminal,point,&ref)!=GHOSTTY_SUCCESS)return;
     GhosttySelectionGestureEvent event=NULL;
-    GhosttySelectionGestureEventType type=action==0?GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_PRESS:(action==1?GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_DRAG:GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_RELEASE);
+    GhosttySelectionGestureEventType type=action==0?GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_PRESS:(action==1?GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_DRAG:(action==2?GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_RELEASE:GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_AUTOSCROLL_TICK));
     if(ghostty_selection_gesture_event_new(NULL,&event,type)!=GHOSTTY_SUCCESS)return;
     GhosttySurfacePosition pos={.x=x,.y=y};uint16_t cols=0,rows=0;ghostty_terminal_get(t->terminal,GHOSTTY_TERMINAL_DATA_COLS,&cols);ghostty_terminal_get(t->terminal,GHOSTTY_TERMINAL_DATA_ROWS,&rows);
     GhosttySelectionGestureGeometry geometry={.columns=cols,.cell_width=cellWidth,.padding_left=0,.screen_height=rows*cellHeight};
     uint64_t interval=500000000;
     ghostty_selection_gesture_event_set(event,GHOSTTY_SELECTION_GESTURE_EVENT_OPT_REF,&ref);
+    if(action==3){
+        GhosttyPointCoordinate viewport={.x=column,.y=row};
+        ghostty_selection_gesture_event_set(event,GHOSTTY_SELECTION_GESTURE_EVENT_OPT_VIEWPORT,&viewport);
+    }
     ghostty_selection_gesture_event_set(event,GHOSTTY_SELECTION_GESTURE_EVENT_OPT_POSITION,&pos);
     ghostty_selection_gesture_event_set(event,GHOSTTY_SELECTION_GESTURE_EVENT_OPT_GEOMETRY,&geometry);
     ghostty_selection_gesture_event_set(event,GHOSTTY_SELECTION_GESTURE_EVENT_OPT_TIME_NS,&timeNanos);
@@ -442,6 +466,15 @@ void il_terminal_select(ILTerminal *t,int action,uint16_t column,uint16_t row,fl
     if(result==GHOSTTY_SUCCESS)ghostty_terminal_set(t->terminal,GHOSTTY_TERMINAL_OPT_SELECTION,&selection);
     else if(action==0)ghostty_terminal_set(t->terminal,GHOSTTY_TERMINAL_OPT_SELECTION,NULL);
     ghostty_selection_gesture_event_free(event);
+}
+
+bool il_terminal_selection_autoscroll(ILTerminal *t){
+    GhosttySelectionGestureAutoscroll state=GHOSTTY_SELECTION_GESTURE_AUTOSCROLL_NONE;
+    return t && ghostty_selection_gesture_get(t->gesture,t->terminal,GHOSTTY_SELECTION_GESTURE_DATA_AUTOSCROLL,&state)==GHOSTTY_SUCCESS && state!=GHOSTTY_SELECTION_GESTURE_AUTOSCROLL_NONE;
+}
+
+void il_terminal_selection_cancel(ILTerminal *t){
+    if(t)ghostty_selection_gesture_reset(t->gesture,t->terminal);
 }
 
 static GhosttyKey physical_key(uint16_t code) {
@@ -503,6 +536,18 @@ bool il_terminal_mouse_reporting(ILTerminal *t){
     return enabled;
 }
 
+size_t il_terminal_alternate_scroll(ILTerminal *t,bool up,char *out,size_t capacity){
+    if(!t || !out || capacity<3 || il_terminal_mouse_reporting(t))return 0;
+    GhosttyTerminalScreen screen=GHOSTTY_TERMINAL_SCREEN_PRIMARY;
+    GhosttyTerminalModeConfig alternate={.mode=GHOSTTY_MODE_ALT_SCROLL};
+    if(ghostty_terminal_get(t->terminal,GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN,&screen)!=GHOSTTY_SUCCESS || screen!=GHOSTTY_TERMINAL_SCREEN_ALTERNATE ||
+       ghostty_terminal_get(t->terminal,GHOSTTY_TERMINAL_DATA_MODE,&alternate)!=GHOSTTY_SUCCESS || !alternate.value)return 0;
+    GhosttyTerminalModeConfig cursor={.mode=GHOSTTY_MODE_DECCKM};
+    ghostty_terminal_get(t->terminal,GHOSTTY_TERMINAL_DATA_MODE,&cursor);
+    ghostty_terminal_set(t->terminal,GHOSTTY_TERMINAL_OPT_SELECTION,NULL);
+    out[0]='\033';out[1]=cursor.value?'O':'[';out[2]=up?'A':'B';return 3;
+}
+
 size_t il_terminal_focus(ILTerminal *t,bool focused,char *out,size_t capacity){
     if(!t || !out || capacity<3)return 0;
     GhosttyTerminalModeConfig mode={.mode=GHOSTTY_MODE_FOCUS_EVENT};
@@ -515,10 +560,80 @@ size_t il_terminal_paste(ILTerminal *t,char *text,size_t length,char *out,size_t
     size_t written=0;if(ghostty_paste_encode(text,length,mode.value,out,capacity,&written)!=GHOSTTY_SUCCESS)return 0;return written;
 }
 
+static bool link_boundary(unsigned char value) {
+    return value <= 0x20 || value == 0x7f || strchr("\"'<>`", value) != NULL;
+}
+
+static size_t link_scheme_length(const char *text, size_t length) {
+    static const char *schemes[] = {"https://", "http://", "mailto:", "file:"};
+    for (size_t i = 0; i < sizeof(schemes) / sizeof(*schemes); i++) {
+        size_t size = strlen(schemes[i]);
+        if (length > size && !strncasecmp(text, schemes[i], size)) return size;
+    }
+    return 0;
+}
+
+static char *plain_link(ILTerminal *t, const GhosttyGridRef *ref) {
+    GhosttyCell cell; uint32_t codepoint = 0;
+    if (ghostty_grid_ref_cell(ref, &cell) != GHOSTTY_SUCCESS) return NULL;
+    ghostty_cell_get(cell, GHOSTTY_CELL_DATA_CODEPOINT, &codepoint);
+    if (codepoint < 0x80 && link_boundary((unsigned char)codepoint)) return NULL;
+    GhosttyTerminalSelectLineOptions options = GHOSTTY_INIT_SIZED(GhosttyTerminalSelectLineOptions);
+    options.ref = *ref; options.semantic_prompt_boundary = true;
+    GhosttySelection line = GHOSTTY_INIT_SIZED(GhosttySelection);
+    if (ghostty_terminal_select_line(t->terminal, &options, &line) != GHOSTTY_SUCCESS) return NULL;
+    bool contains = false;
+    GhosttyPoint point = {.tag=GHOSTTY_POINT_TAG_SCREEN};
+    if (ghostty_terminal_point_from_grid_ref(t->terminal, ref, point.tag, &point.value.coordinate) != GHOSTTY_SUCCESS ||
+        ghostty_terminal_selection_contains(t->terminal, &line, point, &contains) != GHOSTTY_SUCCESS || !contains) return NULL;
+
+    // Reuse Ghostty's logical-line and UTF-8 formatting so soft wraps,
+    // scrollback and wide characters map to the clicked cell correctly.
+    // This bounded work happens only on Command-click, never while rendering.
+    char text[65536]; size_t length = 0, clicked_end = 0;
+    GhosttyTerminalSelectionFormatOptions format = GHOSTTY_INIT_SIZED(GhosttyTerminalSelectionFormatOptions);
+    format.emit = GHOSTTY_FORMATTER_FORMAT_PLAIN; format.unwrap = true; format.selection = &line;
+    if (ghostty_terminal_selection_format_buf(t->terminal, format, (uint8_t *)text, sizeof(text), &length) != GHOSTTY_SUCCESS) return NULL;
+    GhosttySelection prefix = line; prefix.end = *ref; format.selection = &prefix;
+    GhosttyResult result = ghostty_terminal_selection_format_buf(t->terminal, format, NULL, 0, &clicked_end);
+    if ((result != GHOSTTY_SUCCESS && result != GHOSTTY_OUT_OF_SPACE) || !clicked_end) return NULL;
+
+    for (size_t start = 0; start < length; start++) {
+        if (start && (isalnum((unsigned char)text[start-1]) || (unsigned char)text[start-1] >= 0x80 || strchr("_+-./", text[start-1]))) continue;
+        size_t scheme = link_scheme_length(text + start, length - start);
+        if (!scheme) continue;
+        size_t end = start + scheme;
+        int parentheses = 0, brackets = 0;
+        for (; end < length && !link_boundary((unsigned char)text[end]); end++) {
+            if (text[end] == '(') parentheses++;
+            else if (text[end] == ')' && --parentheses < 0) break;
+            else if (text[end] == '[') brackets++;
+            else if (text[end] == ']' && --brackets < 0) break;
+        }
+        while (end > start + scheme && strchr(".,;:!?", text[end-1])) end--;
+        if (end > start + scheme && clicked_end > start && clicked_end <= end) {
+            char *uri = malloc(end - start + 1);
+            if (!uri) return NULL;
+            memcpy(uri, text + start, end - start); uri[end-start] = 0;
+            return uri;
+        }
+        start = end > start ? end - 1 : start;
+    }
+    return NULL;
+}
+
 char *il_terminal_link(ILTerminal *t,uint16_t column,uint16_t row){
     if(!t)return NULL;GhosttyGridRef ref=GHOSTTY_INIT_SIZED(GhosttyGridRef);GhosttyPoint point={.tag=GHOSTTY_POINT_TAG_VIEWPORT,.value={.coordinate={.x=column,.y=row}}};
     if(ghostty_terminal_grid_ref(t->terminal,point,&ref)!=GHOSTTY_SUCCESS)return NULL;
-    size_t length=0;ghostty_grid_ref_hyperlink_uri(&ref,NULL,0,&length);if(!length)return NULL;
+    GhosttyCell cell; GhosttyCellWide wide = GHOSTTY_CELL_WIDE_NARROW;
+    if(ghostty_grid_ref_cell(&ref,&cell)==GHOSTTY_SUCCESS)ghostty_cell_get(cell,GHOSTTY_CELL_DATA_WIDE,&wide);
+    if(wide==GHOSTTY_CELL_WIDE_SPACER_TAIL && column>0){
+        point.value.coordinate.x--;
+        if(ghostty_terminal_grid_ref(t->terminal,point,&ref)!=GHOSTTY_SUCCESS)return NULL;
+    }
+    size_t length=0;ghostty_grid_ref_hyperlink_uri(&ref,NULL,0,&length);
+    if(!length)return plain_link(t,&ref);
+    if(length==SIZE_MAX)return NULL;
     char *result=malloc(length+1);if(!result)return NULL;
     if(ghostty_grid_ref_hyperlink_uri(&ref,(uint8_t *)result,length,&length)!=GHOSTTY_SUCCESS){free(result);return NULL;}result[length]=0;return result;
 }

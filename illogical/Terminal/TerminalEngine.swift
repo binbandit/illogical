@@ -300,6 +300,20 @@ final class TerminalEngine {
     func scrollTo(_ row: UInt64) { correctionView = nil;il_terminal_scroll_to(handle, row);publishViewport();notify() }
     func scrollBottom() { correctionView = nil;il_terminal_scroll_bottom(handle);publishViewport();notify() }
 
+    func alternateScroll(_ rows: Int) -> Bool {
+        guard rows != 0 else { return false }
+        var output = [CChar](repeating: 0, count: 3)
+        let count = il_terminal_alternate_scroll(handle, rows > 0, &output, output.count)
+        guard count > 0 else { return false }
+        let sequence = Data(bytes: output, count: count)
+        let repetitions = min(100, abs(rows))
+        var data = Data()
+        data.reserveCapacity(count * repetitions)
+        for _ in 0..<repetitions { data.append(sequence) }
+        onInput?(data);notify()
+        return true
+    }
+
     func mouse(_ event: NSEvent, action: Int32, button: Int32, point: NSPoint, cell: NSSize) -> Bool {
         var output = [CChar](repeating: 0, count: 256)
         let count = il_terminal_mouse(handle, action, button, Self.modifiers(event.modifierFlags), Float(point.x), Float(point.y), Float(cell.width), Float(cell.height), &output, output.count)
@@ -323,8 +337,12 @@ final class TerminalEngine {
         let col = UInt16(max(0, min(Int(columns) - 1, Int(point.x / cell.width))))
         let row = UInt16(max(0, min(Int(rows) - 1, Int(point.y / cell.height))))
         il_terminal_select(handle, action, col, row, Float(point.x), Float(point.y), Float(cell.width), Float(cell.height), UInt64(event.timestamp * 1_000_000_000), event.modifierFlags.contains(.option))
+        if action == 3 { publishViewport() }
         notify()
     }
+
+    var selectionNeedsAutoscroll: Bool { il_terminal_selection_autoscroll(handle) }
+    func cancelSelectionGesture() { il_terminal_selection_cancel(handle) }
 
     func copy() -> String? {
         var count = 0
