@@ -48,8 +48,8 @@ final class Preferences {
         verticalTabs = defaults.bool(forKey: Key.verticalTabs)
         showPaneTitles = defaults.object(forKey: Key.showPaneTitles) as? Bool ?? true
         unfocusedPaneOpacity = defaults.object(forKey: Key.unfocusedPaneOpacity) as? Double ?? 0.85
-        fontName = defaults.string(forKey: Key.fontName) ?? "SF Mono"
-        fontSize = defaults.object(forKey: Key.fontSize) as? Double ?? 13
+        fontName = defaults.string(forKey: Key.fontName) ?? TerminalFontOptions.defaultFontName
+        fontSize = defaults.object(forKey: Key.fontSize) as? Double ?? Double(TerminalFontOptions.defaultFontSize)
         fontOptions = Self.load(TerminalFontOptions.self, from: defaults, forKey: Key.fontOptions) ?? .defaults
         contrastCorrection = defaults.object(forKey: Key.contrastCorrection) as? Bool ?? true
         copyOnSelection = defaults.bool(forKey: Key.copyOnSelection)
