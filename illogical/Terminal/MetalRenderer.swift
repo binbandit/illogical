@@ -355,7 +355,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         static let selectedBackground: UInt32 = 0xe3ba64, selectedForeground: UInt32 = 0x2b2314
         static let matchBackground: UInt32 = 0x81714d, matchForeground: UInt32 = 0xffffff
     }
-    /// Ligature runs of ASCII operators are shaped together up to this length.
+    /// Runs of ligature symbols are shaped together up to this length.
     private static let maximumOperatorRun = 24
 
     private static let atlases = TerminalResourcePool<AtlasKey, GlyphAtlas>()
@@ -787,21 +787,19 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         return atlas.glyph(key)
     }
 
-    private static func isLigatureOperator(_ byte: CChar) -> Bool {
-        switch UInt8(bitPattern: byte) {
-        case UInt8(ascii: "!"), UInt8(ascii: "%"), UInt8(ascii: "&"), UInt8(ascii: "*"), UInt8(ascii: "+"), UInt8(ascii: "-"),
-             UInt8(ascii: "."), UInt8(ascii: "/"), UInt8(ascii: ":"), UInt8(ascii: "<"), UInt8(ascii: "="), UInt8(ascii: ">"),
-             UInt8(ascii: "?"), UInt8(ascii: "^"), UInt8(ascii: "|"), UInt8(ascii: "~"): true
-        default: false
-        }
-    }
+    /// ASCII symbols that code fonts join into ligatures, such as `=>`,
+    /// `!==`, `#{` and `__`. Letters stay on the per-cell fast path.
+    private static let ligatureSymbols: [Bool] = {
+        var table = [Bool](repeating: false, count: 128)
+        for byte in "!#%&()*+-./:;<=>?[]^_{|}~".utf8 { table[Int(byte)] = true }
+        return table
+    }()
 
-    /// Adjacent, identically styled ASCII operators shape together so code
-    /// fonts can form ligatures such as `=>` and `!==`.
+    /// Adjacent, identically styled ligature symbols shape together.
     private func operatorRun(_ cells: UnsafeBufferPointer<ILCell>, at start: Int, cursorCovers: (ILCell) -> Bool) -> (text: String, count: Int)? {
         let first = cells[start]
         func isOperator(_ cell: ILCell) -> Bool {
-            cell.width == 1 && cell.text.1 == 0 && Self.isLigatureOperator(cell.text.0) && !cursorCovers(cell)
+            cell.width == 1 && cell.text.1 == 0 && cell.text.0 > 0 && Self.ligatureSymbols[Int(cell.text.0)] && !cursorCovers(cell)
         }
         guard isOperator(first), start + 1 < cells.count else { return nil }
         operatorBytes.removeAll(keepingCapacity: true)
