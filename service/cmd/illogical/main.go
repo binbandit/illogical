@@ -1,22 +1,17 @@
 package main
 
 import (
-	"bufio"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
-	"time"
 
 	"illogical/internal/mux"
 )
@@ -33,12 +28,13 @@ Usage: illogical COMMAND [options] [-- program arguments...]
   send-mouse BUTTON          Send mouse input (--x COL --y ROW, zero-based)
   attach / focus             Select a session/window/block in a native client
   capture                    Capture terminal text (--format text|html|vt)
+  clear                      Clear the screen and scrollback (like Cmd-K)
   kill                       Close a terminal (--block) or session (--session)
   move / swap                Reposition a live block relative to --target
   zoom / resize              Change a layout or terminal dimensions
   session new|inspect|rename|kill  Manage sessions
-  window new|inspect|rename|kill   Manage tabs
-  block inspect|process|park|reset|capture|write
+  window new|inspect|rename|kill|move  Manage tabs
+  block inspect|process|park|reset|clear|capture|write
   client list|inspect|rename|detach  Inspect/manage connected clients
   server start|status|inspect|stop   Manage the local service
   events                     Stream workspace events
@@ -48,6 +44,7 @@ Usage: illogical COMMAND [options] [-- program arguments...]
   tailscale discover         List registered illogical tailnet Services
   serve                      Run the service in the foreground
   whoami                     Query the service identity and endpoint
+  version                    Print the version
 
 Options: --session/-s ID, --window/-w ID, --block/-b ID, --target/-t ID,
          --name/-n NAME, --cwd/-C PATH, --axis horizontal|vertical,
@@ -67,7 +64,7 @@ The service starts automatically and outlives GUI and CLI clients.
 `
 
 func main() {
-	if err := run(); err != nil {
+	if err := run(os.Args[1:]); err != nil {
 		var status childExitStatus
 		if errors.As(err, &status) {
 			os.Exit(int(status))
@@ -77,273 +74,182 @@ func main() {
 	}
 }
 
-type connection struct {
-	net.Conn
-	scanner *bufio.Scanner
-	encoder *json.Encoder
-	pending []mux.Message
-	sendMu  sync.Mutex
+type options struct {
+	request          mux.Request
+	positional       []string
+	key              mux.KeyInput
+	mouse            mux.MouseInput
+	socket           string
+	explicitSocket   bool
+	explicitBlock    bool
+	host             string
+	remoteExecutable string
+	tailscaleConfig  string
+	loginHelper      string
 }
 
-func dial(socket string) (*connection, error) {
-	conn, err := net.DialTimeout("unix", socket, time.Second)
-	if err != nil {
-		exe, e := os.Executable()
-		if e != nil {
-			return nil, e
-		}
-		if e = os.MkdirAll(mux.DefaultDirectory(), 0700); e != nil {
-			return nil, e
-		}
-		file, e := os.OpenFile(filepath.Join(mux.DefaultDirectory(), "service.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
-		if e != nil {
-			return nil, e
-		}
-		cmd := exec.Command(exe, "serve", "--socket", socket)
-		cmd.Stdout = file
-		cmd.Stderr = file
-		cmd.Stdin = nil
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-		e = cmd.Start()
-		file.Close()
-		if e != nil {
-			return nil, e
-		}
-		_ = cmd.Process.Release()
-		for i := 0; i < 100; i++ {
-			conn, err = net.DialTimeout("unix", socket, 100*time.Millisecond)
-			if err == nil {
-				break
-			}
-			time.Sleep(30 * time.Millisecond)
-		}
-	}
-	if err != nil {
-		return nil, fmt.Errorf("cannot connect to service: %w", err)
-	}
-	scanner := bufio.NewScanner(conn)
-	scanner.Buffer(make([]byte, 64<<10), 128<<20)
-	return &connection{Conn: conn, scanner: scanner, encoder: json.NewEncoder(conn)}, nil
-}
-
-func (c *connection) send(r mux.Request) error {
-	c.sendMu.Lock()
-	defer c.sendMu.Unlock()
-	return c.encoder.Encode(r)
-}
-
-func (c *connection) request(r mux.Request) (mux.Message, error) {
-	r.ID = mux.NewID()
-	if err := c.send(r); err != nil {
-		return mux.Message{}, err
-	}
-	for c.scanner.Scan() {
-		var m mux.Message
-		if err := json.Unmarshal(c.scanner.Bytes(), &m); err != nil {
-			return m, err
-		}
-		if m.ID != r.ID {
-			if m.Type == "event" {
-				c.pending = append(c.pending, m)
-			}
-			continue
-		}
-		if m.Error != "" {
-			return m, errors.New(m.Error)
-		}
-		return m, nil
-	}
-	if err := c.scanner.Err(); err != nil {
-		return mux.Message{}, err
-	}
-	return mux.Message{}, io.EOF
-}
-
-func (c *connection) next() (mux.Message, error) {
-	if len(c.pending) > 0 {
-		message := c.pending[0]
-		c.pending = c.pending[1:]
-		return message, nil
-	}
-	if !c.scanner.Scan() {
-		if err := c.scanner.Err(); err != nil {
-			return mux.Message{}, err
-		}
-		return mux.Message{}, io.EOF
-	}
-	var message mux.Message
-	err := json.Unmarshal(c.scanner.Bytes(), &message)
-	return message, err
-}
-
-type childExitStatus int
-
-func (status childExitStatus) Error() string {
-	return fmt.Sprintf("process exited with status %d", status)
-}
-
-func exitResult(code *int) error {
-	if code == nil {
-		return errors.New("service did not report the process exit status")
-	}
-	if *code == 0 {
+func run(args []string) error {
+	switch {
+	case len(args) == 0 || args[0] == "help" || args[0] == "--help":
+		fmt.Print(help)
 		return nil
-	}
-	return childExitStatus(*code)
-}
-
-func waitForBlock(c *connection, block string) error {
-	if block == "" {
-		return errors.New("wait requires --block or ILLOGICAL_BLOCK")
-	}
-	// Enabling the subscription and reading this state are atomic on the server.
-	// Preserve events arriving before the reply so even a fast exit is observed.
-	message, err := c.request(mux.Request{Method: "watch"})
-	if err != nil {
-		return err
-	}
-	found := false
-	if message.State != nil {
-		for _, info := range message.State.Blocks {
-			if info.ID == block {
-				found = true
-				if info.ExitCode != nil {
-					return exitResult(info.ExitCode)
-				}
-				break
-			}
-		}
-	}
-	if !found {
-		for _, event := range c.pending {
-			if event.Event == "child_exited" && event.Block == block {
-				return exitResult(event.ExitCode)
-			}
-		}
-		return errors.New("block not found")
-	}
-	for {
-		event, err := c.next()
-		if err != nil {
-			return fmt.Errorf("connection closed before the process exited: %w", err)
-		}
-		if event.Event == "child_exited" && event.Block == block {
-			return exitResult(event.ExitCode)
-		}
-	}
-}
-
-func run() error {
-	args := os.Args[1:]
-	if len(args) > 0 && args[0] == "tailscale" {
+	case args[0] == "version" || args[0] == "--version":
+		fmt.Println(mux.Version)
+		return nil
+	case args[0] == "tailscale":
 		if len(args) == 2 && args[1] == "discover" {
 			return discoverTailscaleServices()
 		}
 		return errors.New("usage: illogical tailscale discover")
-	}
-	if len(args) > 0 && args[0] == "remote" {
+	case args[0] == "remote":
 		return connectRemote(args[1:])
 	}
-	if len(args) == 0 || args[0] == "help" || args[0] == "--help" {
-		fmt.Print(help)
+	o, err := parseOptions(args)
+	if err != nil {
+		return err
+	}
+	if len(o.positional) == 0 {
+		return errors.New("a command is required")
+	}
+	command, rest := o.positional[0], o.positional[1:]
+	if command == "server" && len(rest) > 0 && rest[0] == "run" {
+		command = "serve"
+	}
+	if o.host != "" {
+		if o.explicitSocket {
+			return errors.New("--host cannot be combined with --socket")
+		}
+		if command == "serve" || command == "connect" || command == "remote-endpoint" {
+			return errors.New("use remote HOST for a relay; this command requires a local endpoint")
+		}
+		// ILLOGICAL_BLOCK names a local terminal, not one on the remote host.
+		if !o.explicitBlock {
+			o.request.Block = ""
+		}
+	}
+	if command == "serve" {
+		return serve(o)
+	}
+
+	var c *connection
+	if command == "server" && len(rest) > 0 && (rest[0] == "status" || rest[0] == "stop" || rest[0] == "inspect") && o.host == "" {
+		c, err = dialRunning(o.socket) // Asking about the service must not start it.
+	} else {
+		c, err = dialTarget(o.socket, o.host, o.remoteExecutable)
+	}
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	switch command {
+	case "remote-endpoint":
+		return pairRemoteEndpoint(c)
+	case "connect":
+		done := make(chan error, 2)
+		go func() { _, err := io.Copy(c.Conn, os.Stdin); done <- err }()
+		go func() { _, err := io.Copy(os.Stdout, c.Conn); done <- err }()
+		return <-done
+	}
+	if _, err := c.request(mux.Request{Method: "client.update", Kind: "cli", Label: "illogical " + command}); err != nil {
+		return err
+	}
+	r, err := buildRequest(command, rest, &o)
+	if err != nil {
+		return err
+	}
+	switch command {
+	case "wait":
+		return waitForResource(c, r)
+	case "events":
+		return streamEvents(c, r)
+	}
+	m, err := c.request(r)
+	if err != nil {
+		return err
+	}
+	if r.Method == "block.capture" || r.Method == "block.format" {
+		fmt.Print(m.Text)
 		return nil
 	}
-	socket := mux.SocketPath()
-	r := mux.Request{Block: os.Getenv("ILLOGICAL_BLOCK")}
-	var positional []string
-	var host, remoteExecutable, tailscaleConfig, loginHelper string
-	var explicitSocket, explicitBlock bool
-	keyInput := mux.KeyInput{}
-	mouseInput := mux.MouseInput{}
+	encoder := json.NewEncoder(os.Stdout)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(m)
+}
+
+func parseOptions(args []string) (options, error) {
+	o := options{socket: mux.SocketPath(), request: mux.Request{Block: os.Getenv("ILLOGICAL_BLOCK")}}
+	r := &o.request
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
-		if arg == "--" {
+		switch {
+		case arg == "--":
 			r.Command = args[i+1:]
-			break
-		}
-		if arg == "--keep-open" {
+			return o, nil
+		case arg == "--keep-open":
 			r.KeepOpen = true
 			continue
-		}
-		if arg == "--release" {
+		case arg == "--release":
 			r.Release = true
 			continue
-		}
-		if !strings.HasPrefix(arg, "-") {
-			positional = append(positional, arg)
+		case !strings.HasPrefix(arg, "-"):
+			o.positional = append(o.positional, arg)
 			continue
-		}
-		if i+1 == len(args) {
-			return fmt.Errorf("missing value for %s", arg)
+		case i+1 == len(args):
+			return o, fmt.Errorf("missing value for %s", arg)
 		}
 		i++
 		value := args[i]
+		var err error
 		switch arg {
 		case "--socket":
-			socket = value
-			explicitSocket = true
+			o.socket, o.explicitSocket = value, true
 		case "--login-helper":
-			loginHelper = value
+			o.loginHelper = value
 		case "--tailscale-config":
-			tailscaleConfig = value
+			o.tailscaleConfig = value
 		case "--host":
-			host = value
+			o.host = value
 		case "--remote-executable":
-			remoteExecutable = value
+			o.remoteExecutable = value
 		case "--client":
 			r.Client = value
 		case "--kind":
 			r.Kind = value
 		case "--json":
-			if err := json.Unmarshal([]byte(value), &r); err != nil {
-				return fmt.Errorf("invalid request JSON: %w", err)
+			if err = json.Unmarshal([]byte(value), r); err != nil {
+				return o, fmt.Errorf("invalid request JSON: %w", err)
 			}
 			var fields map[string]json.RawMessage
-			if json.Unmarshal([]byte(value), &fields) == nil {
-				if _, ok := fields["block"]; ok {
-					explicitBlock = true
-				}
+			if json.Unmarshal([]byte(value), &fields) == nil && fields["block"] != nil {
+				o.explicitBlock = true
 			}
 		case "--theme":
 			r.Theme = &mux.Theme{}
-			if err := json.Unmarshal([]byte(value), r.Theme); err != nil {
-				return err
-			}
+			err = json.Unmarshal([]byte(value), r.Theme)
 		case "--data":
 			r.Data = []byte(value)
 		case "--action":
-			keyInput.Action = value
-			mouseInput.Action = value
+			o.key.Action, o.mouse.Action = value, value
 		case "--mods":
-			keyInput.Mods = value
-			mouseInput.Mods = value
-		case "--x", "--y":
-			v, err := strconv.ParseUint(value, 10, 32)
-			if err != nil {
-				return err
-			}
-			if arg == "--x" {
-				mouseInput.X = uint32(v)
-			} else {
-				mouseInput.Y = uint32(v)
-			}
-		case "--cell-width", "--cell-height":
-			v, err := strconv.ParseUint(value, 10, 32)
-			if err != nil {
-				return err
-			}
-			if arg == "--cell-width" {
-				r.CellWidth = uint32(v)
-			} else {
-				r.CellHeight = uint32(v)
-			}
+			o.key.Mods, o.mouse.Mods = value, value
+		case "--x":
+			o.mouse.X, err = parseUint[uint32](value)
+		case "--y":
+			o.mouse.Y, err = parseUint[uint32](value)
+		case "--cell-width":
+			r.CellWidth, err = parseUint[uint32](value)
+		case "--cell-height":
+			r.CellHeight, err = parseUint[uint32](value)
+		case "--cols":
+			r.Cols, err = parseUint[uint16](value)
+		case "--rows":
+			r.Rows, err = parseUint[uint16](value)
 		case "--session", "-s":
 			r.Session = value
 		case "--window", "-w":
 			r.Window = value
 		case "--block", "-b":
-			r.Block = value
-			explicitBlock = true
+			r.Block, o.explicitBlock = value, true
 		case "--target", "-t":
 			r.Target = value
 		case "--name", "-n":
@@ -352,109 +258,34 @@ func run() error {
 			r.Cwd = value
 		case "--axis":
 			if value != "horizontal" && value != "vertical" {
-				return errors.New("axis must be horizontal or vertical")
+				return o, errors.New("axis must be horizontal or vertical")
 			}
 			r.Axis = value
 		case "--format":
 			r.Format = value
 		case "--ratio":
-			v, err := strconv.ParseFloat(value, 64)
-			if err != nil {
-				return err
-			}
-			r.Ratio = v
-		case "--cols", "--rows":
-			v, err := strconv.ParseUint(value, 10, 16)
-			if err != nil {
-				return err
-			}
-			if arg == "--cols" {
-				r.Cols = uint16(v)
-			} else {
-				r.Rows = uint16(v)
-			}
+			r.Ratio, err = strconv.ParseFloat(value, 64)
 		default:
-			return fmt.Errorf("unknown option %s", arg)
+			return o, fmt.Errorf("unknown option %s", arg)
 		}
-	}
-	if len(positional) == 0 {
-		return errors.New("a command is required")
-	}
-	command := positional[0]
-	rest := positional[1:]
-	if host != "" && explicitSocket {
-		return errors.New("--host cannot be combined with --socket")
-	}
-	if host != "" && !explicitBlock {
-		r.Block = ""
-	}
-	if command == "server" && len(rest) > 0 && rest[0] == "run" {
-		command = "serve"
-	}
-	if host != "" && (command == "serve" || command == "connect" || command == "remote-endpoint") {
-		return errors.New("use remote HOST for a relay; this command requires a local endpoint")
-	}
-	if command == "serve" {
-		s, err := mux.NewServer(mux.DefaultDirectory(), socket, mux.WithLoginHelper(loginHelper))
 		if err != nil {
-			return err
+			return o, fmt.Errorf("%s: %w", arg, err)
 		}
-		defer s.Close()
-		if tailscaleConfig != "" {
-			cfg, err := mux.LoadTailscaleConfig(tailscaleConfig)
-			if err != nil {
-				return err
-			}
-			transport, err := s.StartTailscale(cfg)
-			if err != nil {
-				return err
-			}
-			defer transport.Close()
-		}
-		interrupt := make(chan os.Signal, 1)
-		signal.Notify(interrupt, syscall.SIGTERM, syscall.SIGINT)
-		defer signal.Stop(interrupt)
-		go func() { <-interrupt; s.Close() }()
-		log.Printf("illogical service listening at %s", socket)
-		return s.Run()
 	}
-	var c *connection
-	var err error
-	if command == "server" && len(rest) > 0 && (rest[0] == "status" || rest[0] == "stop" || rest[0] == "inspect") && host == "" {
-		var conn net.Conn
-		conn, err = net.DialTimeout("unix", socket, time.Second)
-		if err == nil {
-			scanner := bufio.NewScanner(conn)
-			scanner.Buffer(make([]byte, 64<<10), 128<<20)
-			c = &connection{Conn: conn, scanner: scanner, encoder: json.NewEncoder(conn)}
-		}
-	} else {
-		c, err = dialTarget(socket, host, remoteExecutable)
+	return o, nil
+}
+
+func parseUint[T uint16 | uint32](value string) (T, error) {
+	v, err := strconv.ParseUint(value, 10, 32)
+	if err == nil && uint64(T(v)) != v {
+		err = strconv.ErrRange
 	}
-	if err != nil {
-		return err
-	}
-	defer c.Close()
-	if command == "remote-endpoint" {
-		fields := strings.Fields(os.Getenv("SSH_CONNECTION"))
-		if len(fields) != 4 {
-			return errors.New("remote pairing must be bootstrapped through SSH")
-		}
-		response, err := c.request(mux.Request{Method: "remote.pair", Label: fields[2]})
-		if err != nil {
-			return err
-		}
-		return json.NewEncoder(os.Stdout).Encode(response)
-	}
-	if command == "connect" {
-		errors := make(chan error, 2)
-		go func() { _, e := io.Copy(c.Conn, os.Stdin); errors <- e }()
-		go func() { _, e := io.Copy(os.Stdout, c.Conn); errors <- e }()
-		return <-errors
-	}
-	if _, err := c.request(mux.Request{Method: "client.update", Kind: "cli", Label: "illogical " + command}); err != nil {
-		return err
-	}
+	return T(v), err
+}
+
+// buildRequest maps a CLI command onto a protocol request.
+func buildRequest(command string, rest []string, o *options) (mux.Request, error) {
+	r := o.request
 	switch command {
 	case "ls", "list":
 		r.Method = "state"
@@ -472,16 +303,37 @@ func run() error {
 		r.Data = []byte(strings.Join(rest, " "))
 	case "send-key":
 		r.Method = "block.key"
-		keyInput.Name = strings.Join(rest, " ")
-		r.Key = &keyInput
+		o.key.Name = strings.Join(rest, " ")
+		r.Key = &o.key
 	case "send-mouse":
 		r.Method = "block.mouse"
-		mouseInput.Button = strings.Join(rest, " ")
-		r.Mouse = &mouseInput
+		o.mouse.Button = strings.Join(rest, " ")
+		r.Mouse = &o.mouse
 	case "attach", "focus":
 		r.Method = "focus"
 	case "whoami":
 		r.Method = "whoami"
+	case "capture":
+		r.Method = "block.capture"
+	case "clear":
+		r.Method = "block.clear"
+	case "kill":
+		r.Method = "block.kill"
+		if r.Session != "" {
+			r.Method = "session.kill"
+		}
+	case "move", "swap":
+		r.Method = "block." + command
+	case "zoom":
+		r.Method = "window.zoom"
+		if r.Window == "" {
+			r.Window = r.Block
+		}
+	case "resize":
+		r.Method = "block.resize"
+		if r.Ratio > 0 {
+			r.Method = "layout.resize"
+		}
 	case "client", "server":
 		action := "list"
 		if command == "server" {
@@ -491,127 +343,149 @@ func run() error {
 			action = rest[0]
 		}
 		if command == "server" && action == "start" {
-			action = "status"
+			action = "status" // Connecting already started it.
 		}
 		r.Method = command + "." + action
 		if command == "client" && len(rest) > 1 {
 			r.Client = rest[1]
 		}
-	case "capture":
-		r.Method = "block.capture"
-	case "kill":
-		if r.Session != "" {
-			r.Method = "session.kill"
-		} else {
-			r.Method = "block.kill"
-		}
-	case "move", "swap":
-		r.Method = "block." + command
-	case "zoom":
-		r.Method = "window.zoom"
-	case "resize":
-		if r.Ratio > 0 {
-			r.Method = "layout.resize"
-		} else {
-			r.Method = "block.resize"
-		}
 	case "session", "window", "block":
-		if len(rest) == 0 {
-			return errors.New("resource action is required")
-		}
-		if command == "block" && rest[0] == "call" {
-			if len(rest) >= 3 {
-				r.Block = rest[1]
-				explicitBlock = true
-				rest = append([]string{rest[2]}, rest[3:]...)
-			} else if len(rest) >= 2 {
-				rest = rest[1:]
-			} else {
-				return errors.New("block call requires a method")
-			}
-		}
-		r.Method = command + "." + rest[0]
-		isWrite := command == "block" && rest[0] == "write"
-		if len(rest) > 1 && (!isWrite || !explicitBlock && (r.Block == "" || len(rest) > 2 || r.Data != nil)) {
-			if command == "session" {
-				r.Session = rest[1]
-			} else if command == "window" {
-				r.Window = rest[1]
-			} else {
-				r.Block = rest[1]
-			}
-		}
-		if command == "session" && rest[0] == "new" && r.Label == "" && len(rest) > 1 {
-			r.Label = rest[1]
-		}
-		if command == "block" && rest[0] == "write" {
-			payload := rest[1:]
-			if len(payload) > 0 && payload[0] == r.Block {
-				payload = payload[1:]
-			}
-			if len(payload) > 0 {
-				r.Data = []byte(strings.Join(payload, " "))
-			}
+		if err := resourceRequest(command, rest, o, &r); err != nil {
+			return r, err
 		}
 	case "api":
-		if len(rest) == 0 {
-			r.Method = "api"
-		} else {
+		r.Method = "api"
+		if len(rest) > 0 {
 			r.Method = rest[0]
 		}
 	case "events", "wait":
 		r.Method = "watch"
+		// A session or window scope replaces the ILLOGICAL_BLOCK default.
+		if command == "events" && !o.explicitBlock && (r.Session != "" || r.Window != "") {
+			r.Block = ""
+		}
 	default:
-		return fmt.Errorf("unknown command %s", command)
+		return r, fmt.Errorf("unknown command %s", command)
 	}
-	if r.Cwd != "" && host == "" && r.Method != "block.list_dir" && r.Method != "directory.list" {
-		r.Cwd, err = filepath.Abs(r.Cwd)
+	if r.Cwd != "" && o.host == "" && r.Method != "block.list_dir" && r.Method != "directory.list" {
+		cwd, err := filepath.Abs(r.Cwd)
+		if err != nil {
+			return r, err
+		}
+		r.Cwd = cwd
+	}
+	return r, nil
+}
+
+// resourceRequest handles `session|window|block ACTION [ID] [ARGS...]` and
+// `block call ID METHOD`.
+func resourceRequest(command string, rest []string, o *options, r *mux.Request) error {
+	if len(rest) == 0 {
+		return errors.New("resource action is required")
+	}
+	if command == "block" && rest[0] == "call" {
+		switch {
+		case len(rest) >= 3:
+			r.Block, o.explicitBlock = rest[1], true
+			rest = rest[2:]
+		case len(rest) == 2:
+			rest = rest[1:]
+		default:
+			return errors.New("block call requires a method")
+		}
+	}
+	action := rest[0]
+	r.Method = command + "." + action
+	isWrite := command == "block" && action == "write"
+	// For block write, a lone argument is the text unless no block is known.
+	if len(rest) > 1 && (!isWrite || !o.explicitBlock && (r.Block == "" || len(rest) > 2 || r.Data != nil)) {
+		switch command {
+		case "session":
+			r.Session = rest[1]
+		case "window":
+			r.Window = rest[1]
+		default:
+			r.Block = rest[1]
+		}
+	}
+	if command == "session" && action == "new" && r.Label == "" && len(rest) > 1 {
+		r.Label = rest[1]
+	}
+	if isWrite {
+		payload := rest[1:]
+		if len(payload) > 0 && payload[0] == r.Block {
+			payload = payload[1:]
+		}
+		if len(payload) > 0 {
+			r.Data = []byte(strings.Join(payload, " "))
+		}
+	}
+	return nil
+}
+
+func serve(o options) error {
+	s, err := mux.NewServer(mux.DefaultDirectory(), o.socket, mux.WithLoginHelper(o.loginHelper))
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+	if o.tailscaleConfig != "" {
+		config, err := mux.LoadTailscaleConfig(o.tailscaleConfig)
 		if err != nil {
 			return err
 		}
+		transport, err := s.StartTailscale(config)
+		if err != nil {
+			return err
+		}
+		defer transport.Close()
 	}
-	if r.Method == "window.zoom" && r.Window == "" {
-		r.Window = r.Block
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
+	defer signal.Stop(signals)
+	go func() { <-signals; s.Close() }()
+	log.Printf("illogical %s service listening at %s", mux.Version, o.socket)
+	return s.Run()
+}
+
+// pairRemoteEndpoint issues QUIC credentials for the SSH client that ran us.
+func pairRemoteEndpoint(c *connection) error {
+	fields := strings.Fields(os.Getenv("SSH_CONNECTION"))
+	if len(fields) != 4 {
+		return errors.New("remote pairing must be bootstrapped through SSH")
 	}
-	if (command == "events") && !explicitBlock && (r.Session != "" || r.Window != "") {
-		r.Block = ""
+	response, err := c.request(mux.Request{Method: "remote.pair", Label: fields[2]})
+	if err != nil {
+		return err
 	}
-	if command == "wait" {
-		return waitForResource(c, r)
-	}
+	return json.NewEncoder(os.Stdout).Encode(response)
+}
+
+// streamEvents prints events in the requested scope until disconnected.
+func streamEvents(c *connection, r mux.Request) error {
 	m, err := c.request(r)
 	if err != nil {
 		return err
 	}
-	if command == "events" {
-		if session := findStateSession(m.State, r.Session); session != nil {
-			r.Session = session.ID
+	state := m.State
+	if session := findStateSession(state, r.Session); session != nil {
+		r.Session = session.ID // Follow the session through renames.
+	}
+	encoder := json.NewEncoder(os.Stdout)
+	for {
+		event, err := c.next()
+		if err != nil {
+			return err
 		}
-		encoder := json.NewEncoder(os.Stdout)
-		for {
-			event, err := c.next()
-			if err != nil {
-				return err
-			}
-			if !eventMatches(r, event, m.State) {
-				if event.State != nil {
-					m.State = event.State
-				}
-				continue
-			}
-			if event.State != nil {
-				m.State = event.State
-			}
-			if err := encoder.Encode(event); err != nil {
-				return err
-			}
+		matches := eventMatches(r, event, state)
+		if event.State != nil {
+			state = event.State
+		}
+		if !matches {
+			continue
+		}
+		if err := encoder.Encode(event); err != nil {
+			return err
 		}
 	}
-	if r.Method == "block.capture" || r.Method == "block.format" {
-		fmt.Print(m.Text)
-		return nil
-	}
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-	return enc.Encode(m)
 }
