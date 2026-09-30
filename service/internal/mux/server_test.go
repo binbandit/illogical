@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -275,6 +276,34 @@ func TestMalformedRequestsFailWithoutHarm(t *testing.T) {
 	}
 	if c.request(t, Request{Method: "block.process", Block: created.Block}).Process.ExitCode != nil {
 		t.Fatal("terminal did not survive malformed requests")
+	}
+}
+
+// A daily-driver service sees thousands of CLI and app connections; each must
+// leave nothing behind, including attach history streams.
+func TestClientConnectionsDoNotLeakGoroutines(t *testing.T) {
+	_, socket := startTest(t)
+	admin := connectTest(t, socket)
+	created := admin.request(t, Request{Method: "session.new", Command: []string{"/bin/sh", "-c", "seq 1 20000; sleep 30"}, KeepOpen: true})
+	waitCapture(t, admin, created.Block, "20000")
+	baseline := runtime.NumGoroutine()
+	for range 20 {
+		conn, err := net.Dial("unix", socket)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Attach and hang up without reading the scrollback history.
+		_ = json.NewEncoder(conn).Encode(Request{ID: "attach", Method: "block.attach", Block: created.Block})
+		_ = json.NewEncoder(conn).Encode(Request{ID: "watch", Method: "watch"})
+		time.Sleep(5 * time.Millisecond)
+		conn.Close()
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for runtime.NumGoroutine() > baseline {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d goroutines remain after disconnecting, baseline %d", runtime.NumGoroutine(), baseline)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
