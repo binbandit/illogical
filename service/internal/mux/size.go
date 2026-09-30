@@ -40,9 +40,16 @@ func (b *Block) resizeFor(client string, size DesiredSize) error {
 	b.server.changed()
 	return nil
 }
+
+var errSizeBounds = errors.New("terminal dimensions are outside supported bounds")
+
+func validSize(cols, rows uint16) bool {
+	return cols >= 2 && rows >= 1 && cols <= 1000 && rows <= 1000
+}
+
 func (b *Block) requestSize(client string, r Request) error {
-	if r.Cols < 2 || r.Rows < 1 || r.Cols > 1000 || r.Rows > 1000 {
-		return errors.New("terminal dimensions are outside supported bounds")
+	if !validSize(r.Cols, r.Rows) {
+		return errSizeBounds
 	}
 	if r.CellWidth > 65535 || r.CellHeight > 65535 {
 		return errors.New("cell dimensions are outside supported bounds")

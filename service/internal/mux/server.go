@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"net"
 	"os"
@@ -132,7 +133,6 @@ func (s *Server) Close() {
 		_ = s.persistLocked()
 		blocks := make([]*Block, 0, len(s.blocks))
 		for _, b := range s.blocks {
-			_ = b.park(true)
 			b.close()
 			blocks = append(blocks, b)
 		}
@@ -467,9 +467,21 @@ func (s *Server) persistStateLocked(state State) error {
 	return atomicWrite(filepath.Join(s.directory, "workspace.json"), data)
 }
 
+// restore recreates the saved layout with a fresh shell in each pane's last
+// directory. Processes survive client detach, not service or host restarts.
+// Anything the saved state references but cannot back with a shell is dropped.
 func (s *Server) restore() error {
-	data, err := os.ReadFile(filepath.Join(s.directory, "workspace.json"))
-	if os.IsNotExist(err) {
+	// Scrollback snapshots and interrupted atomic writes belong to the
+	// previous service's processes; nothing below reads them.
+	_ = os.RemoveAll(filepath.Join(s.directory, "snapshots"))
+	if temporary, err := filepath.Glob(filepath.Join(s.directory, ".write-*")); err == nil {
+		for _, path := range temporary {
+			_ = os.Remove(path)
+		}
+	}
+	path := filepath.Join(s.directory, "workspace.json")
+	data, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
 	if err != nil {
@@ -477,36 +489,66 @@ func (s *Server) restore() error {
 	}
 	var state State
 	if err = json.Unmarshal(data, &state); err != nil {
-		return err
+		aside := path + ".corrupt"
+		_ = os.Rename(path, aside)
+		return fmt.Errorf("unreadable workspace moved to %s: %w", aside, err)
 	}
-	s.sessions = state.Sessions
-	if s.sessions == nil {
-		s.sessions = []*Session{}
-	}
+	saved := make(map[string]BlockInfo, len(state.Blocks))
 	for _, info := range state.Blocks {
-		// A service restart recreates a shell at its saved location. Process
-		// survival is guaranteed across client detach, not host/service death.
-		r := Request{Cwd: info.Cwd, Cols: info.Cols, Rows: info.Rows, KeepOpen: true}
-		if ss, w := s.findWindow(info.ID); w != nil {
-			r.Session, r.Window = ss.ID, w.ID
-		}
-		b, err := s.newBlock(r, info.ID)
-		if err != nil {
-			for _, ss := range s.sessions {
-				for _, w := range ss.Windows {
-					w.Root = w.Root.remove(info.ID)
-				}
-			}
+		saved[info.ID] = info
+	}
+	for _, ss := range state.Sessions {
+		if ss == nil {
 			continue
 		}
-		b.mu.Lock()
-		b.info.Label = info.Label
-		b.info.Creator = info.Creator
-		b.mu.Unlock()
-		s.blocks[b.info.ID] = b
+		windows := make([]*Window, 0, len(ss.Windows))
+		for _, w := range ss.Windows {
+			if w == nil {
+				continue
+			}
+			for _, id := range w.Root.blocks() {
+				info, ok := saved[id]
+				if ok && s.blocks[id] == nil {
+					b, err := s.restoreBlock(info, ss.ID, w.ID)
+					if err == nil {
+						s.blocks[id] = b
+						continue
+					}
+					log.Printf("restore terminal %s: %v", id, err)
+				}
+				w.Root = w.Root.remove(id)
+			}
+			windows = append(windows, w)
+		}
+		ss.Windows = windows
+		s.sessions = append(s.sessions, ss)
 	}
 	s.pruneLocked()
 	return nil
+}
+
+func (s *Server) restoreBlock(info BlockInfo, session, window string) (*Block, error) {
+	r := Request{Session: session, Window: window, Label: info.Label, Cwd: existingDirectory(info.Cwd), KeepOpen: info.KeepOpen}
+	if validSize(info.Cols, info.Rows) {
+		r.Cols, r.Rows = info.Cols, info.Rows
+	}
+	b, err := s.newBlock(r, info.ID)
+	if err != nil {
+		return nil, err
+	}
+	b.mu.Lock()
+	b.info.Creator = info.Creator
+	b.mu.Unlock()
+	return b, nil
+}
+
+// existingDirectory returns path if it is still a directory, or "" so the
+// caller falls back to the home directory.
+func existingDirectory(path string) string {
+	if info, err := os.Stat(path); err == nil && info.IsDir() {
+		return path
+	}
+	return ""
 }
 
 func (s *Server) findSession(id string) *Session {
@@ -568,7 +610,7 @@ func (s *Server) pruneLocked() {
 	for _, ss := range s.sessions {
 		kept := ss.Windows[:0]
 		for _, w := range ss.Windows {
-			if w.Root != nil {
+			if len(w.Root.blocks()) > 0 {
 				if !w.Root.contains(w.FocusedBlock) {
 					ids := w.Root.blocks()
 					if len(ids) > 0 {
@@ -648,7 +690,7 @@ func (s *Server) handle(c *client, r Request) Message {
 		if r.Cwd == "" {
 			if parent := s.blocks[r.Block]; parent != nil {
 				parent.mu.Lock()
-				r.Cwd = parent.currentDirectory()
+				r.Cwd = existingDirectory(parent.currentDirectory())
 				parent.mu.Unlock()
 			}
 		}
@@ -793,7 +835,7 @@ func (s *Server) handle(c *client, r Request) Message {
 		}
 		if r.Cwd == "" {
 			b.mu.Lock()
-			r.Cwd = b.currentDirectory()
+			r.Cwd = existingDirectory(b.currentDirectory())
 			b.mu.Unlock()
 		}
 		r.Session, r.Window = ss.ID, w.ID

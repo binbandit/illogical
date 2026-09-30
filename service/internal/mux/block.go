@@ -82,6 +82,9 @@ func (s *Server) newBlock(r Request, id string) (*Block, error) {
 	if rows == 0 {
 		rows = 30
 	}
+	if !validSize(cols, rows) {
+		return nil, errSizeBounds
+	}
 	b := &Block{server: s, lastOutput: time.Now(), snapshotPath: filepath.Join(s.directory, "snapshots", id+".gz"), info: BlockInfo{ID: id, Session: r.Session, Window: r.Window, Title: filepath.Base(command[0]), Cwd: cwd, Cols: cols, Rows: rows, Command: command, KeepOpen: r.KeepOpen}}
 	b.replay.epoch = NewID()
 	b.info.Label = r.Label
