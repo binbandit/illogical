@@ -635,7 +635,8 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
     private func sendKey(_ event: NSEvent, translation: NSEvent.ModifierFlags, text: String? = nil, composing: Bool = false) {
         guard case .sent(let typed) = engine.key(event, text: text, translation: translation, composing: composing) else { return }
         pressedKeys.insert(event.keyCode)
-        if typed && hidePointerWhileTyping && !event.isARepeat { NSCursor.setHiddenUntilMouseMoves(true) }
+        // Ghostty's mouse-hide-while-typing; the pointer returns when the mouse moves.
+        if typed && hidePointerWhileTyping && !event.isARepeat && NSApp.isActive { NSCursor.setHiddenUntilMouseMoves(true) }
     }
 
     /// A single C0 control character, which an input method may produce while composing.
