@@ -56,22 +56,25 @@ struct TerminalScrollingTests {
             output.removeAll()
         }
         feed(alt, "\u{1b}[?1049h\u{1b}[?1007h")
-        altView.scrollWheel(with: wheel(altView, y: 1));expect("\u{1b}[A", "Alternate-screen up uses a normal cursor key")
-        altView.scrollWheel(with: wheel(altView, y: -2));expect("\u{1b}[B\u{1b}[B", "Alternate-screen down preserves magnitude")
+        func times(_ sequence: String, _ count: Int) -> String { String(repeating: sequence, count: count) }
+        altView.scrollWheel(with: wheel(altView, y: 1));expect(times("\u{1b}[A", 3), "Alternate-screen up sends three cursor keys per detent")
+        altView.scrollWheel(with: wheel(altView, y: -2));expect(times("\u{1b}[B", 6), "Alternate-screen down preserves magnitude")
+        altView.scrollWheel(with: wheel(altView, y: 1.5));expect(times("\u{1b}[A", 4), "Fractional detents keep their remainder")
+        altView.scrollWheel(with: wheel(altView, y: 1.5));expect(times("\u{1b}[A", 5), "The pending half row is applied next")
         feed(alt, "\u{1b}[?1h")
-        altView.scrollWheel(with: wheel(altView, y: 1));expect("\u{1b}OA", "Application cursor up")
-        altView.scrollWheel(with: wheel(altView, y: -1));expect("\u{1b}OB", "Application cursor down")
+        altView.scrollWheel(with: wheel(altView, y: 1));expect(times("\u{1b}OA", 3), "Application cursor up")
+        altView.scrollWheel(with: wheel(altView, y: -1));expect(times("\u{1b}OB", 3), "Application cursor down")
         feed(alt, "\u{1b}[?1007l")
         altView.scrollWheel(with: wheel(altView, y: 1));expect("", "Disabled alternate scroll does not send keys")
         feed(alt, "\u{1b}[?1007h\u{1b}[?1049l")
         altView.scrollWheel(with: wheel(altView, y: 1));expect("", "Primary screen does not send cursor keys")
         feed(alt, "\u{1b}[?1049h\u{1b}[?1000h\u{1b}[?1006h")
-        altView.scrollWheel(with: wheel(altView, y: 1));expect("\u{1b}[<64;1;1M", "Mouse reporting takes precedence over alternate scroll")
+        altView.scrollWheel(with: wheel(altView, y: 1));expect(times("\u{1b}[<64;1;1M", 3), "Mouse reporting takes precedence over alternate scroll")
         altView.scrollWheel(with: wheel(altView, x: 1));expect("\u{1b}[<66;1;1M", "Horizontal positive detent reaches the application")
         altView.scrollWheel(with: wheel(altView, x: -1));expect("\u{1b}[<67;1;1M", "Horizontal negative detent reaches the application")
-        altView.scrollWheel(with: wheel(altView, y: 1, x: -1));expect("\u{1b}[<64;1;1M\u{1b}[<67;1;1M", "Both axes in one event are preserved")
-        altView.scrollWheel(with: wheel(altView, y: 0.1));expect("\u{1b}[<64;1;1M", "A slow physical upward detent is immediate")
-        altView.scrollWheel(with: wheel(altView, y: -0.1));expect("\u{1b}[<65;1;1M", "A slow physical downward detent is immediate")
+        altView.scrollWheel(with: wheel(altView, y: 1, x: -1));expect(times("\u{1b}[<64;1;1M", 3) + "\u{1b}[<67;1;1M", "Both axes in one event are preserved")
+        altView.scrollWheel(with: wheel(altView, y: 0.1));expect(times("\u{1b}[<64;1;1M", 3), "A slow physical upward detent is a whole detent")
+        altView.scrollWheel(with: wheel(altView, y: -0.1));expect(times("\u{1b}[<65;1;1M", 3), "A slow physical downward detent is a whole detent")
         altView.scrollWheel(with: wheel(altView, y: 1, shift: true));expect("", "Shift bypasses application mouse reporting")
         let cell = altView.renderer!.cell
         let verticalPart = ceil(cell.height / 2)
@@ -83,16 +86,16 @@ struct TerminalScrollingTests {
         altView.scrollWheel(with: wheel(altView, x: horizontalPart, precise: true));expect("", "A partial trackpad gesture remains pending")
         altView.scrollWheel(with: wheel(altView, x: 1));expect("\u{1b}[<66;1;1M", "Physical wheel does not inherit a trackpad remainder")
         altView.scrollWheel(with: wheel(altView, x: horizontalPart, precise: true));expect("", "Returning to trackpad starts a new accumulation")
-        print("Native wheel input: alternate cursor modes, reporting precedence, both axes, slow detents and precise accumulation passed.")
+        print("Native wheel input: three rows per detent, alternate cursor modes, reporting precedence, both axes, slow detents and precise accumulation passed.")
 
         let (drag, view, window) = fixture("selection-autoscroll")
         defer { view.detach();window.contentView = nil }
         for index in 0..<100 { feed(drag, "line-\(String(format: "%03d", index))\r\n") }
         drag.scrollTo(20)
         view.scrollWheel(with: wheel(view, y: 0.1))
-        precondition(drag.frame()!.scrollOffset == 19, "Slow physical scrolling also moves ordinary local scrollback immediately")
+        precondition(drag.frame()!.scrollOffset == 17, "A slow physical detent scrolls local scrollback three rows")
         view.scrollWheel(with: wheel(view, x: 1))
-        precondition(drag.frame()!.scrollOffset == 19, "Horizontal scrolling does not accidentally move vertical history")
+        precondition(drag.frame()!.scrollOffset == 17, "Horizontal scrolling does not accidentally move vertical history")
         let dragCell = view.renderer!.cell
         var timestamp: Double = 10
         func mouse(_ type: NSEvent.EventType, row: CGFloat) -> NSEvent {

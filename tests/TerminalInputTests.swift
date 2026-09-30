@@ -45,6 +45,22 @@ struct TerminalInputTests {
         check(key(11, "∫", "b", .option) == Data("∫".utf8), "Native Option character")
         check(key(0, "a", "a", release: true).isEmpty, "No release bytes in legacy mode")
 
+        let text = Data("selected words".utf8)
+        text.withUnsafeBytes { il_terminal_feed(engine.handle, $0.bindMemory(to: UInt8.self).baseAddress, text.count) }
+        func hasSelection() -> Bool { !(engine.copy() ?? "").isEmpty }
+        engine.selectAll()
+        let shift = NSEvent.keyEvent(with: .flagsChanged, location: .zero, modifierFlags: .shift, timestamp: 0, windowNumber: 0,
+                                     context: nil, characters: "", charactersIgnoringModifiers: "", isARepeat: false, keyCode: 56)!
+        engine.key(shift)
+        check(hasSelection(), "A modifier press keeps the selection")
+        _ = key(0, "a", "a")
+        check(!hasSelection(), "Typing clears the selection like Ghostty's selection-clear-on-typing")
+        engine.selectAll();engine.typeText("日本")
+        check(!hasSelection(), "Committed input-method text clears the selection")
+        engine.selectAll();engine.paste("pasted")
+        check(hasSelection(), "Paste keeps the selection")
+        output.removeAll()
+
         let modes = Data("\u{1b}[?1h".utf8)
         modes.withUnsafeBytes { il_terminal_feed(engine.handle, $0.bindMemory(to: UInt8.self).baseAddress, modes.count) }
         check(key(126, "\u{f700}", "\u{f700}") == Data("\u{1b}OA".utf8), "Application cursor mode")

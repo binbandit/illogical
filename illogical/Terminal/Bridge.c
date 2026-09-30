@@ -477,6 +477,10 @@ void il_terminal_selection_cancel(ILTerminal *t){
     if(t)ghostty_selection_gesture_reset(t->gesture,t->terminal);
 }
 
+void il_terminal_clear_selection(ILTerminal *t){
+    if(t)ghostty_terminal_set(t->terminal,GHOSTTY_TERMINAL_OPT_SELECTION,NULL);
+}
+
 static GhosttyKey physical_key(uint16_t code) {
     switch(code) {
     case 0:return GHOSTTY_KEY_A;case 1:return GHOSTTY_KEY_S;case 2:return GHOSTTY_KEY_D;case 3:return GHOSTTY_KEY_F;case 4:return GHOSTTY_KEY_H;case 5:return GHOSTTY_KEY_G;

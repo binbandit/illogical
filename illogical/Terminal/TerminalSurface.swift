@@ -430,7 +430,7 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
         let text=(string as? NSAttributedString)?.string ?? (string as? String ?? "")
         let wasMarked=hasMarkedText() || composingAtKeyDown;unmarkText()
         if wasMarked, text.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7f }) { return }
-        if let event=insertionEvent,!wasMarked{forwardKeyDown(event,text:text)}else{engine.send(Data(text.utf8))}
+        if let event=insertionEvent,!wasMarked{forwardKeyDown(event,text:text)}else{engine.typeText(text)}
     }
     func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
         guard interactive, peekProgress == 0 else { return }
@@ -551,13 +551,16 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
 
     private static func scrollUnits(_ delta: CGFloat, cell: CGFloat, precise: Bool, vertical: Bool, remainder: inout CGFloat) -> Int {
         guard delta.isFinite, delta != 0, cell > 0 else { return 0 }
-        if !precise {
-            // AppKit reports a slow physical vertical detent as 0.1. Ghostty
-            // normalizes it to one row and rounds horizontal wheel ticks.
-            let normalized = vertical ? (delta > 0 ? max(1, delta) : min(-1, delta)) : delta.rounded()
-            return Int(max(-100, min(100, normalized)))
+        if precise {
+            remainder += max(-100, min(100, delta / cell))
+        } else if vertical {
+            // Ghostty scrolls mouse-scroll-multiplier.discrete (3) rows per
+            // detent. AppKit reports a slow physical detent as 0.1, which
+            // Ghostty rounds out to a whole detent.
+            remainder += max(-100, min(100, (delta > 0 ? max(1, delta) : min(-1, delta)) * 3))
+        } else {
+            return Int(max(-100, min(100, delta.rounded())))
         }
-        remainder += max(-100, min(100, delta / cell))
         let units = Int(remainder)
         remainder -= CGFloat(units)
         return units

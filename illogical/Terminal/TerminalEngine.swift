@@ -271,7 +271,18 @@ final class TerminalEngine {
             il_terminal_key(handle, event.keyCode, mods, consumed, release ? 0 : (isCharacterEvent && event.isARepeat ? 2 : 1), $0, filtered.utf8.count,
                             unshifted.unicodeScalars.count == 1 ? unshifted.unicodeScalars.first!.value : 0, &buffer, buffer.count)
         }
-        if written > 0 { send(Data(bytes: buffer, count: written)) }
+        guard written > 0 else { return }
+        // Ghostty's selection-clear-on-typing: any non-modifier key that
+        // reaches the program drops the selection.
+        if isCharacterEvent && !release { il_terminal_clear_selection(handle) }
+        send(Data(bytes: buffer, count: written))
+    }
+
+    /// Committed input-method text is typing too.
+    func typeText(_ text: String) {
+        guard !text.isEmpty else { return }
+        il_terminal_clear_selection(handle)
+        send(Data(text.utf8))
     }
 
     private static func keyText(_ text: String) -> String {

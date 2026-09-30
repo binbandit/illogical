@@ -65,6 +65,7 @@ size_t il_terminal_paste(ILTerminal *terminal, char *text, size_t length, char *
 void il_terminal_select(ILTerminal *terminal, int action, uint16_t column, uint16_t row, float x, float y, float cellWidth, float cellHeight, uint64_t timeNanos, bool rectangle);
 bool il_terminal_selection_autoscroll(ILTerminal *terminal);
 void il_terminal_selection_cancel(ILTerminal *terminal);
+void il_terminal_clear_selection(ILTerminal *terminal);
 void il_terminal_select_all(ILTerminal *terminal);
 char *il_terminal_copy(ILTerminal *terminal, size_t *length);
 void il_bytes_free(void *bytes);
