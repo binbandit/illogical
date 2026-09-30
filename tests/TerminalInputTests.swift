@@ -144,6 +144,10 @@ struct TerminalInputTests {
         viewport.key(event(125, "\u{f701}", "\u{f701}", .command))
         check(offset() == 12, "Command-Down jumps to the next prompt")
         check(viewportInput.isEmpty, "Viewport bindings send nothing to the program")
+        Data(String(repeating: "more output\r\n", count: 10).utf8).withUnsafeBytes {
+            il_terminal_feed(viewport.handle, $0.bindMemory(to: UInt8.self).baseAddress, $0.count)
+        }
+        check(offset() == 12, "New output does not move a viewport the user scrolled up")
 
         // Large pastes are split under the service's per-write limit and arrive complete, in order.
         let large = String(repeating: "0123456789abcdef", count: 200_000)

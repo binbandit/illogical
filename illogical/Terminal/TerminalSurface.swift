@@ -202,7 +202,8 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
     var confirmUnsafePaste = true
     /// Asks whether to paste text that could run commands; answers asynchronously.
     lazy var confirmPaste: (String, @escaping (Bool) -> Void) -> Void = { [weak self] text, answer in
-        self?.presentPasteConfirmation(text, answer: answer) ?? answer(false)
+        guard let self else { return answer(false) }
+        self.presentPasteConfirmation(text, answer: answer)
     }
     var interactive = true {
         didSet {
