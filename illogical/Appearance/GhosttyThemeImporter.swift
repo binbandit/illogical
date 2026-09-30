@@ -108,6 +108,7 @@ enum GhosttyThemeImporter {
                 case "minimum-contrast": theme.minimumContrast = try number(value, default: 1, range: 1...21, key: key)
                 case "background-opacity": theme.backgroundOpacity = try number(value, default: 1, range: 0...1, key: key)
                 case "background-opacity-cells": theme.backgroundOpacityCells = try boolean(value, key: key)
+                case "background-blur": theme.backgroundBlur = try blurRadius(value, key: key)
                 case "palette-generate": generate = try boolean(value, key: key)
                 case "palette-harmonious": harmonious = try boolean(value, key: key)
                 case "palette":
@@ -188,6 +189,17 @@ enum GhosttyThemeImporter {
         guard let number = Double(value), number.isFinite else { throw invalid(key, value) }
         return min(range.upperBound, max(range.lowerBound, number))
     }
+    /// Ghostty accepts a radius, `true` (radius 20) or `false`.
+    private static func blurRadius(_ value: String, key: String) throws -> Int {
+        switch value {
+        case "", "false": return 0
+        case "true": return 20
+        default:
+            guard let radius = Int(value), radius >= 0 else { throw invalid(key, value) }
+            return min(radius, 100)
+        }
+    }
+
     private static func boolean(_ value: String, key: String) throws -> Bool {
         if value.isEmpty || value == "false" { return false }
         if value == "true" { return true }

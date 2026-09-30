@@ -1,0 +1,201 @@
+import AppKit
+import SwiftUI
+
+/// Empty titlebar space: dragging moves the window and double-clicking does
+/// what the user chose in System Settings (zoom, minimise or nothing).
+struct WindowDragArea: NSViewRepresentable {
+    func makeNSView(context: Context) -> DragView { DragView() }
+    func updateNSView(_ view: DragView, context: Context) {}
+
+    final class DragView: NSView {
+        override func mouseDown(with event: NSEvent) {
+            guard let window else { return }
+            if event.clickCount == 2 { Self.performDoubleClickAction(on: window) } else { window.performDrag(with: event) }
+        }
+
+        static func performDoubleClickAction(on window: NSWindow) {
+            let defaults = UserDefaults.standard
+            switch defaults.string(forKey: "AppleActionOnDoubleClick") {
+            case "Minimize": window.miniaturize(nil)
+            case "None": break
+            case nil where defaults.bool(forKey: "AppleMiniaturizeOnDoubleClick"): window.miniaturize(nil)
+            default: window.zoom(nil)
+            }
+        }
+    }
+}
+
+/// Connects a workspace window to its model: window styling, title,
+/// translucency, close confirmations, activation and closing.
+struct WindowConfigurator: NSViewRepresentable {
+    let model: WorkspaceModel
+    let title: String
+    let theme: TerminalTheme
+    @Binding var isFullScreen: Bool
+
+    func makeCoordinator() -> Coordinator { Coordinator(model: model, isFullScreen: $isFullScreen) }
+
+    func makeNSView(context: Context) -> WindowObserverView {
+        let view = WindowObserverView()
+        view.onWindow = { [coordinator = context.coordinator] window in coordinator.attach(window) }
+        return view
+    }
+
+    func updateNSView(_ view: WindowObserverView, context: Context) {
+        context.coordinator.isFullScreen = $isFullScreen
+        context.coordinator.apply(title: title, theme: theme)
+    }
+
+    final class WindowObserverView: NSView {
+        var onWindow: ((NSWindow) -> Void)?
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if let window { onWindow?(window) }
+        }
+    }
+
+    @MainActor
+    final class Coordinator {
+        let model: WorkspaceModel
+        var isFullScreen: Binding<Bool>
+        private weak var window: NSWindow?
+        private var observers: [NSObjectProtocol] = []
+        private var title = ""
+        private var theme: TerminalTheme?
+
+        init(model: WorkspaceModel, isFullScreen: Binding<Bool>) {
+            self.model = model
+            self.isFullScreen = isFullScreen
+        }
+
+        isolated deinit { observers.forEach(NotificationCenter.default.removeObserver) }
+
+        func attach(_ window: NSWindow) {
+            guard self.window !== window else { return }
+            self.window = window
+            model.window = window
+            window.titleVisibility = .hidden
+            window.titlebarAppearsTransparent = true
+            window.styleMask.insert(.fullSizeContentView)
+            window.isMovableByWindowBackground = false
+            window.tabbingMode = .disallowed
+            window.collectionBehavior.insert(.fullScreenPrimary)
+            if let topLeft = WorkspaceRegistry.shared.nextWindowTopLeft {
+                WorkspaceRegistry.shared.nextWindowTopLeft = nil
+                window.setFrameTopLeftPoint(topLeft)
+            }
+            model.onRequestActivation = { [weak window] in
+                window?.makeKeyAndOrderFront(nil)
+                NSApp.activate()
+            }
+            model.onRequestClose = { [weak window] in window?.close() }
+            model.confirmClose = { [weak window] prompt, reply in
+                guard let window else { reply(false);return }
+                Self.confirm(prompt, in: window, reply: reply)
+            }
+            let center = NotificationCenter.default
+            observers = [
+                center.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.model.close() }
+                },
+                center.addObserver(forName: NSWindow.didEnterFullScreenNotification, object: window, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.fullScreenChanged() }
+                },
+                center.addObserver(forName: NSWindow.didExitFullScreenNotification, object: window, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.fullScreenChanged() }
+                },
+                // The window server only accepts a blur once the window is on screen.
+                center.addObserver(forName: NSWindow.didBecomeKeyNotification, object: window, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.applyBlur();self?.centerTrafficLights() }
+                },
+                // AppKit lays the titlebar out again whenever the window resizes.
+                center.addObserver(forName: NSWindow.didResizeNotification, object: window, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.centerTrafficLights() }
+                },
+            ]
+            DispatchQueue.main.async { [weak self] in self?.centerTrafficLights() }
+            let current = (title, theme)
+            title = ""
+            theme = nil
+            if let currentTheme = current.1 { apply(title: current.0, theme: currentTheme) }
+        }
+
+        func apply(title: String, theme: TerminalTheme) {
+            guard let window else { self.title = title;self.theme = theme;return }
+            if window.title != title { window.title = title }
+            guard self.theme != theme else { return }
+            self.theme = theme
+            let fullScreen = window.styleMask.contains(.fullScreen)
+            let opaque = fullScreen || theme.effectiveBackgroundOpacity >= 1
+            window.isOpaque = opaque
+            window.backgroundColor = opaque ? NSColor(hex: theme.background) : .clear
+            applyBlur()
+        }
+
+        private func applyBlur() {
+            guard let window, let theme else { return }
+            let translucent = !window.styleMask.contains(.fullScreen) && theme.effectiveBackgroundOpacity < 1
+            WindowBlur.apply(radius: translucent ? theme.backgroundBlur ?? 0 : 0, to: window)
+        }
+
+        private func centerTrafficLights() {
+            if let window { TrafficLights.center(in: window, height: Chrome.Titlebar.height) }
+        }
+
+        private func fullScreenChanged() {
+            guard let window else { return }
+            isFullScreen.wrappedValue = window.styleMask.contains(.fullScreen)
+            centerTrafficLights()
+            if let theme { self.theme = nil;apply(title: window.title, theme: theme) }
+        }
+
+        /// A sheet like Ghostty's: Close is the default button, Cancel answers Escape.
+        private static func confirm(_ prompt: ClosePrompt, in window: NSWindow, reply: @escaping (Bool) -> Void) {
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = prompt.title
+            alert.informativeText = prompt.message
+            alert.addButton(withTitle: "Close")
+            alert.addButton(withTitle: "Cancel").keyEquivalent = "\u{1b}"
+            alert.beginSheetModal(for: window) { response in reply(response == .alertFirstButtonReturn) }
+        }
+    }
+}
+
+/// Centres the close, minimise and zoom buttons vertically in the custom
+/// titlebar by growing their container, as Electron's trafficLightPosition
+/// does. The buttons keep their system x positions.
+enum TrafficLights {
+    @MainActor
+    static func center(in window: NSWindow, height: CGFloat) {
+        guard !window.styleMask.contains(.fullScreen), let close = window.standardWindowButton(.closeButton),
+              let container = close.superview?.superview, let frameView = container.superview else { return }
+        var frame = container.frame
+        let top = frameView.bounds.height
+        guard frame.height != height || frame.maxY != top else { return }
+        frame.size.height = height
+        frame.origin.y = top - height
+        container.frame = frame
+    }
+}
+
+/// Blurs what is behind a translucent window, like Ghostty's
+/// `background-blur`. Uses the window server call Ghostty and iTerm2 use;
+/// when it is unavailable the window is simply unblurred.
+enum WindowBlur {
+    private typealias DefaultConnection = @convention(c) () -> Int32
+    private typealias SetBlurRadius = @convention(c) (Int32, Int, Int32) -> Int32
+
+    private static let functions: (DefaultConnection, SetBlurRadius)? = {
+        guard let handle = dlopen(nil, RTLD_NOW),
+              let connection = dlsym(handle, "CGSDefaultConnectionForThread"),
+              let setRadius = dlsym(handle, "CGSSetWindowBackgroundBlurRadius") else { return nil }
+        return (unsafeBitCast(connection, to: DefaultConnection.self), unsafeBitCast(setRadius, to: SetBlurRadius.self))
+    }()
+
+    @MainActor
+    static func apply(radius: Int, to window: NSWindow) {
+        guard let (connection, setRadius) = functions, window.windowNumber > 0 else { return }
+        _ = setRadius(connection(), window.windowNumber, Int32(max(0, min(radius, 100))))
+    }
+}

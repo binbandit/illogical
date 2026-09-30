@@ -1,122 +1,232 @@
 import SwiftUI
 
-struct AppearanceSettings: View {
-    @ObservedObject var model: WorkspaceModel
-    @Environment(\.dismiss) private var dismiss
+/// The Settings window (Command-,). Every change applies to all windows at once.
+struct SettingsView: View {
+    @Bindable private var preferences = Preferences.shared
+    @ObservedObject private var hostStore = HostProfileStore.shared
+    @State private var showAddHost = false
+    @State private var importedThemes: [TerminalTheme] = []
+    @State private var importError: String?
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            HStack { Text("Appearance").font(.system(size: 21, weight: .semibold)); Spacer(); Button("Done") { dismiss() }.keyboardShortcut(.defaultAction) }
-            Form {
-                Section("Workspace") {
-                    Picker("Interface", selection: $model.interfaceStyle) { ForEach(InterfaceStyle.allCases, id: \.self) { Text($0.rawValue).tag($0) } }.pickerStyle(.segmented)
-                    Picker("Panes", selection: $model.density) { ForEach(Density.allCases, id: \.self) { Text($0.rawValue).tag($0) } }.pickerStyle(.segmented)
-                    Toggle("Vertical tabs", isOn: $model.verticalTabs)
-                    Toggle("Show pane titles", isOn: $model.showPaneTitles)
+        Form {
+            Section("Workspace") {
+                Picker("Interface", selection: $preferences.interfaceStyle) {
+                    ForEach(InterfaceStyle.allCases, id: \.self) { Text($0.rawValue).tag($0) }
                 }
-                Section("Terminal") {
-                    Toggle("Follow macOS appearance", isOn: $model.followSystemAppearance)
-                    if model.followSystemAppearance {
-                        Picker("Light theme", selection: $model.lightThemeName) { ForEach(model.themes.filter(\.isLight)) { Text($0.name).tag($0.name) } }
-                        Picker("Dark theme", selection: $model.darkThemeName) { ForEach(model.themes.filter { !$0.isLight }) { Text($0.name).tag($0.name) } }
-                    } else {
-                        Picker("Theme", selection: Binding(get: { model.themeName }, set: { model.selectTheme($0) })) { ForEach(model.themes) { Text($0.name).tag($0.name) } }
+                .pickerStyle(.segmented)
+                Picker("Panes", selection: $preferences.density) {
+                    ForEach(Density.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                Toggle("Vertical tabs", isOn: $preferences.verticalTabs)
+                Toggle("Show pane titles", isOn: $preferences.showPaneTitles)
+                LabeledContent("Unfocused panes") {
+                    Slider(value: $preferences.unfocusedPaneOpacity, in: 0.5...1) { Text("Unfocused panes") }
+                        .labelsHidden()
+                }
+                .help("How visible panes without focus stay, like Ghostty's unfocused-split-opacity.")
+            }
+            Section("Theme") {
+                Toggle("Follow macOS appearance", isOn: $preferences.followSystemAppearance)
+                if preferences.followSystemAppearance {
+                    Picker("Light theme", selection: $preferences.lightThemeName) {
+                        ForEach(preferences.themes.filter(\.isLight)) { Text($0.name).tag($0.name) }
                     }
-                    TextField("Font", text: $model.fontName)
-                    HStack { Text("Text size"); Slider(value: $model.fontSize, in: 9...24, step: 1); Text("\(Int(model.fontSize)) pt").monospacedDigit().frame(width: 42) }
-                    Toggle("Thicken text", isOn: $model.fontOptions.thicken)
-                    Button("Use Ghostty Font Settings") { model.importGhosttyFont() }
-                    Toggle("Improve low-contrast text", isOn: $model.contrastCorrection)
-                    Toggle("Copy text when selected", isOn: $model.copyOnSelection)
-                    Toggle("Synchronize scrolling with other viewers", isOn: $model.synchronizeViewports)
-                        .disabled(!model.supportsViewportSync())
-                        .help(model.supportsViewportSync() ? "Share scrolling with viewers who enable this option." : "This host needs a newer illogical service to share scrolling.")
-                    Button("Import Ghostty Themes…") { dismiss(); DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { model.importGhostty() } }
-                }
-                Section("Remote hosts") {
-                    ForEach(model.hosts.filter { !$0.isLocal }) { host in
-                        HStack { Label(host.name, systemImage: "network"); Spacer(); Button("Remove") { model.removeHost(host) }.foregroundStyle(.secondary) }
+                    Picker("Dark theme", selection: $preferences.darkThemeName) {
+                        ForEach(preferences.themes.filter { !$0.isLight }) { Text($0.name).tag($0.name) }
                     }
-                    Button("Add Remote Host…") { dismiss(); DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { model.showAddHost = true } }
+                } else {
+                    Picker("Theme", selection: Binding(get: { preferences.themeName }, set: { preferences.selectTheme($0) })) {
+                        ForEach(preferences.themes) { Text($0.name).tag($0.name) }
+                    }
                 }
-            }.formStyle(.grouped)
-        }.padding(24).frame(width: 540, height: 630)
+                Button("Import Ghostty Themes…") { importThemes() }
+            }
+            Section("Terminal") {
+                TextField("Font", text: $preferences.fontName)
+                LabeledContent("Text size") {
+                    HStack {
+                        Slider(value: $preferences.fontSize, in: 9...24, step: 1) { Text("Text size") }.labelsHidden()
+                        Text("\(Int(preferences.fontSize)) pt").monospacedDigit().frame(width: 42, alignment: .trailing)
+                    }
+                }
+                Toggle("Thicken text", isOn: $preferences.fontOptions.thicken)
+                Button("Use Ghostty Font Settings") {
+                    do { try preferences.importGhosttyFont() } catch { importError = error.localizedDescription }
+                }
+                Toggle("Improve low-contrast text", isOn: $preferences.contrastCorrection)
+                Toggle("Copy text when selected", isOn: $preferences.copyOnSelection)
+                Toggle("Synchronize scrolling with other viewers", isOn: $preferences.synchronizeViewports)
+                    .help("Share scrolling with other clients that enable this option. Needs a current illogical service.")
+            }
+            Section("Remote hosts") {
+                ForEach(hostStore.hosts.filter { !$0.isLocal }) { host in
+                    HStack {
+                        Label(host.name, systemImage: "network")
+                        Spacer()
+                        Button("Remove") { hostStore.remove(host.id) }.foregroundStyle(.secondary)
+                    }
+                }
+                Button("Add Remote Host…") { showAddHost = true }
+            }
+        }
+        .formStyle(.grouped)
+        .frame(width: 520)
+        .fixedSize(horizontal: false, vertical: true)
+        .sheet(isPresented: $showAddHost) { AddHostSheet() }
+        .sheet(isPresented: Binding(get: { !importedThemes.isEmpty }, set: { if !$0 { importedThemes = [] } })) {
+            MigrationSheet(themes: importedThemes, tint: preferences.theme.tint) { adopt in
+                if adopt { preferences.adopt(importedThemes) }
+                importedThemes = []
+            }
+        }
+        .alert("Could not import from Ghostty", isPresented: Binding(get: { importError != nil }, set: { if !$0 { importError = nil } })) {
+            Button("OK") { importError = nil }
+        } message: {
+            Text(importError ?? "")
+        }
+    }
+
+    private func importThemes() {
+        do { importedThemes = try GhosttyThemeImporter.importConfiguration() } catch { importError = error.localizedDescription }
     }
 }
 
 struct AddHostSheet: View {
-    @ObservedObject var model: WorkspaceModel
     @Environment(\.dismiss) private var dismiss
     @State private var name = ""
     @State private var address = ""
     @State private var executable = "~/.local/bin/illogical"
+    @State private var error: String?
     @StateObject private var discovery = HostDiscovery()
+
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
             Label("Add Remote Host", systemImage: "network").font(.system(size: 21, weight: .semibold))
-            Text("Connect to a Mac or Linux host using your existing SSH keys and configuration.").font(.system(size: 12)).foregroundStyle(.secondary)
+            Text("Connect to a Mac or Linux host using your existing SSH keys and configuration.")
+                .font(.system(size: 12)).foregroundStyle(.secondary)
             Form {
                 TextField("Name", text: $name, prompt: Text("Development server"))
                 TextField("Host", text: $address, prompt: Text("user@host or SSH alias"))
                 TextField("illogical executable", text: $executable)
             }
-            Text("Install the matching illogical service on the host first. The host must already be trusted by SSH; password prompts are not supported here.").font(.system(size: 11)).foregroundStyle(.secondary)
+            Text("Install the matching illogical service on the host first. The host must already be trusted by SSH; password prompts are not supported here.")
+                .font(.system(size: 11)).foregroundStyle(.secondary)
             HStack {
                 Button("Discover Tailscale Services") { discovery.discover() }
                 if discovery.loading { ProgressView().controlSize(.small) }
             }
-            if let message = discovery.message { Text(message).font(.system(size: 11)).foregroundStyle(.secondary) }
+            if let message = error ?? discovery.message {
+                Text(message).font(.system(size: 11)).foregroundStyle(.secondary)
+            }
             if !discovery.hosts.isEmpty {
                 ScrollView {
                     VStack(spacing: 4) {
                         ForEach(discovery.hosts) { host in
-                            Button { name = host.name; address = host.address } label: {
-                                HStack { Image(systemName: "network"); Text(host.name); Spacer(); Text(host.service).font(.system(size: 10)).foregroundStyle(.secondary) }.padding(8).contentShape(Rectangle())
-                            }.buttonStyle(.plain)
+                            Button { name = host.name;address = host.address } label: {
+                                HStack {
+                                    Image(systemName: "network")
+                                    Text(host.name)
+                                    Spacer()
+                                    Text(host.service).font(.system(size: 10)).foregroundStyle(.secondary)
+                                }
+                                .padding(8)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
                         }
                     }
-                }.frame(maxHeight: 160)
+                }
+                .frame(maxHeight: 160)
             }
-            HStack { Spacer(); Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction); Button("Connect") { model.addHost(name: name, address: address, executable: executable) }.keyboardShortcut(.defaultAction).disabled(address.trimmingCharacters(in: .whitespaces).isEmpty) }
-        }.padding(28).frame(width: 480)
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("Connect") {
+                    error = HostProfileStore.shared.add(name: name, address: address, executable: executable)
+                    if error == nil { dismiss() }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(address.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+        .padding(28)
+        .frame(width: 480)
     }
 }
 
 struct RenameSheet: View {
-    @ObservedObject var model: WorkspaceModel
+    let request: RenameRequest
+    let onCommit: (String) -> Void
+    let onCancel: () -> Void
+    @State private var name = ""
     @FocusState private var focused: Bool
+
+    private var canRename: Bool { !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            Text(model.renameTarget == "session" ? "Rename Session" : "Rename Tab").font(.headline)
-            TextField("Name", text: $model.renameValue).focused($focused).onSubmit { model.finishRename() }
-            HStack { Spacer(); Button("Cancel") { model.cancelRename() }.keyboardShortcut(.cancelAction); Button("Rename") { model.finishRename() }.keyboardShortcut(.defaultAction).disabled(!model.canRename) }
-        }.padding(24).frame(width: 360).onAppear { focused = true }
+            Text(request.title).font(.headline)
+            TextField("Name", text: $name)
+                .focused($focused)
+                .onSubmit { if canRename { onCommit(name) } }
+            HStack {
+                Spacer()
+                Button("Cancel", action: onCancel).keyboardShortcut(.cancelAction)
+                Button("Rename") { onCommit(name) }.keyboardShortcut(.defaultAction).disabled(!canRename)
+            }
+        }
+        .padding(24)
+        .frame(width: 360)
+        .onAppear { name = request.name;focused = true }
     }
 }
 
+/// Previews themes imported from Ghostty before applying them.
 struct MigrationSheet: View {
-    @ObservedObject var model: WorkspaceModel
+    let themes: [TerminalTheme]
+    let tint: Color
+    let onFinish: (_ adopt: Bool) -> Void
+
     var body: some View {
         VStack(spacing: 20) {
-            ZStack {
-                ForEach(0..<20) { index in
-                    Capsule().fill(index.isMultiple(of: 2) ? Color.blue.opacity(0.5) : Color.orange.opacity(0.5)).frame(width: 3, height: 7)
-                        .rotationEffect(.degrees(Double(index * 37))).offset(x: CGFloat((index * 83) % 410) - 205, y: CGFloat((index * 29) % 85) - 35)
-                }
-                Image(systemName: "paintpalette").font(.system(size: 42, weight: .light)).foregroundStyle(model.theme.tint)
-            }.frame(height: 90)
+            Image(systemName: "paintpalette").font(.system(size: 42, weight: .light)).foregroundStyle(tint).frame(height: 70)
             Text("Your themes, right at home.").font(.system(size: 23, weight: .semibold))
-            Text("We found your Ghostty colors. Bring them into illogical with one click.").font(.system(size: 12)).foregroundStyle(.secondary).multilineTextAlignment(.center)
+            Text("We found your Ghostty colors. Bring them into illogical with one click.")
+                .font(.system(size: 12)).foregroundStyle(.secondary).multilineTextAlignment(.center)
             HStack(spacing: 14) {
-                ForEach(model.migration) { theme in
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("~ ❯ echo hello").font(.system(size: 11, design: .monospaced))
-                        Text("hello").font(.system(size: 11, design: .monospaced)).opacity(0.7)
-                        HStack(spacing: 4) { ForEach(Array(theme.ansi.prefix(8).enumerated()), id: \.offset) { _, value in Circle().fill(Color(hex: value)).frame(width: 12, height: 12) } }
-                        Text(theme.name).font(.system(size: 10, weight: .medium)).lineLimit(1).padding(.top, 10)
-                    }.foregroundStyle(theme.text).padding(18).frame(maxWidth: .infinity, alignment: .leading).background(theme.color, in: RoundedRectangle(cornerRadius: 12))
+                ForEach(themes) { theme in ThemePreview(theme: theme) }
+            }
+            .padding(.vertical, 4)
+            HStack {
+                Button("Keep Current Theme") { onFinish(false) }.keyboardShortcut(.cancelAction)
+                Spacer()
+                Button("Use These Themes") { onFinish(true) }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(30)
+        .frame(width: 540)
+    }
+}
+
+private struct ThemePreview: View {
+    let theme: TerminalTheme
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("~ ❯ echo hello").font(.system(size: 11, design: .monospaced))
+            Text("hello").font(.system(size: 11, design: .monospaced)).opacity(0.7)
+            HStack(spacing: 4) {
+                ForEach(Array(theme.ansi.prefix(8).enumerated()), id: \.offset) { _, value in
+                    Circle().fill(Color(hex: value)).frame(width: 12, height: 12)
                 }
-            }.padding(.vertical, 4)
-            HStack { Button("Keep Current Theme") { model.migration = [] }; Spacer(); Button("Use These Themes") { model.useMigratedThemes() }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction) }
-        }.padding(30).frame(width: 540)
+            }
+            Text(theme.name).font(.system(size: 10, weight: .medium)).lineLimit(1).padding(.top, 10)
+        }
+        .foregroundStyle(theme.text)
+        .padding(18)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(theme.color.opacity(theme.effectiveBackgroundOpacity), in: RoundedRectangle(cornerRadius: 12))
     }
 }

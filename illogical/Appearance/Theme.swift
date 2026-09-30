@@ -32,6 +32,8 @@ struct TerminalTheme: Codable, Identifiable, Equatable {
     var minimumContrast: Double? = nil
     var backgroundOpacity: Double? = nil
     var backgroundOpacityCells: Bool? = nil
+    /// Blur radius behind a translucent window, like Ghostty's `background-blur`.
+    var backgroundBlur: Int? = nil
 
     var palette: [UInt32] {
         var values = Array(ansi.prefix(16))
