@@ -16,7 +16,7 @@ if [ "${ILLOGICAL_RENDER_SANITIZE:-0}" = 1 ]; then
   SWIFT_RENDER_SANITIZER_FLAGS=-sanitize=address
 fi
 swiftc $SWIFT_RENDER_SANITIZER_FLAGS -O -whole-module-optimization -swift-version 5 -target arm64-apple-macos15 -I illogical/Terminal -import-objc-header illogical/Terminal/Bridge.h \
-  .build/display-text/DisplayText.swift illogical/Terminal/TerminalPresentationState.swift illogical/Terminal/TerminalEngine.swift \
+  .build/display-text/DisplayText.swift illogical/Terminal/TerminalPresentationState.swift illogical/Terminal/TerminalEngine.swift illogical/Terminal/TerminalSurface.swift \
   illogical/Terminal/TerminalFont.swift illogical/Terminal/TerminalTextRuns.swift illogical/Terminal/TerminalFontOptions.swift illogical/Terminal/TerminalCellGeometry.swift illogical/Terminal/TerminalCellDrawing.swift \
   illogical/Appearance/ContrastCorrection.swift illogical/Appearance/Theme.swift illogical/Model/Protocol.swift illogical/LaunchMetrics.swift \
   .build/display-text/Bridge.o .build/ghostty/lib/libghostty-vt.a -o .build/display-text/display-text-test

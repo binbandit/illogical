@@ -14,27 +14,66 @@ nonisolated private struct MetalDrawableTransfer: @unchecked Sendable {
     let drawable: CAMetalDrawable?
 }
 
+/// One instanced rectangle. Must match `Quad` in Terminal.metal.
 private struct TerminalQuad {
+    enum Kind: UInt32 {
+        case solid = 0, glyph, colorGlyph, image, curlyLine, dottedLine, dashedLine
+    }
+
     var rect: SIMD4<Float>
-    var uv: SIMD4<Float>
+    var uv: SIMD4<Float> = .zero
     var color: SIMD4<Float>
-    var textured: UInt32
+    var kind: UInt32
+    var thickness: Float = 0
     // Metal arrays stride by 64 bytes. Explicit storage also makes a single
-    // stack quad safe to upload at that length (Swift's unpadded size is 52).
-    var padding0: UInt32 = 0
-    var padding1: UInt32 = 0
-    var padding2: UInt32 = 0
+    // stack quad safe to upload at that length.
+    private var padding: SIMD2<UInt32> = .zero
+
+    init(rect: SIMD4<Float>, uv: SIMD4<Float> = .zero, color: SIMD4<Float>, kind: Kind, thickness: Float = 0) {
+        self.rect = rect; self.uv = uv; self.color = color; self.kind = kind.rawValue; self.thickness = thickness
+    }
+
+    init(_ rect: CGRect, color: SIMD4<Float>, kind: Kind = .solid) {
+        self.init(rect: SIMD4(Float(rect.minX), Float(rect.minY), Float(rect.width), Float(rect.height)), color: color, kind: kind)
+    }
+}
+
+/// Must match `Uniforms` in Terminal.metal.
+private struct TerminalUniforms {
+    var viewport: SIMD2<Float>
+    var cellWidth: Float
+    var smoothGlyphs: UInt32
+}
+
+/// Premultiplied RGBA from packed 0xRRGGBB.
+private func premultiplied(_ value: UInt32, alpha: Float = 1) -> SIMD4<Float> {
+    SIMD4(Float((value >> 16) & 255) / 255 * alpha, Float((value >> 8) & 255) / 255 * alpha, Float(value & 255) / 255 * alpha, alpha)
 }
 
 @MainActor
 private final class TerminalImageTextureCache {
     struct Key: Hashable { let namespace: String; let id: UInt32; let generation: UInt64 }
     private struct Entry { let texture: MTLTexture; let cost: Int; var used: UInt64 }
+    /// Kitty `f=` formats as carried by the service.
+    private enum Format: Int {
+        case rgb = 0, rgba = 1, grayAlpha = 3, gray = 4
+        var components: Int {
+            switch self {
+            case .rgb: 3
+            case .rgba: 4
+            case .grayAlpha: 2
+            case .gray: 1
+            }
+        }
+    }
+
     private var entries: [Key: Entry] = [:]
     private var clock: UInt64 = 0
     private(set) var byteCount = 0
     var count: Int { entries.count }
     let byteLimit: Int
+    private let maximumEntries = 1_024
+    private let maximumDimension = 16_384
 
     init(byteLimit: Int = 64 * 1_024 * 1_024) { self.byteLimit = byteLimit }
 
@@ -49,35 +88,25 @@ private final class TerminalImageTextureCache {
     func texture(device: MTLDevice, namespace: String, image: WireGraphicsImage) -> MTLTexture? {
         let key = Key(namespace: namespace, id: image.id, generation: image.generation)
         clock &+= 1
-        if var entry = entries[key] { entry.used = clock; entries[key] = entry; return entry.texture }
+        if var entry = entries[key] {
+            entry.used = clock
+            entries[key] = entry
+            return entry.texture
+        }
         let width = Int(image.width), height = Int(image.height)
-        guard width > 0, height > 0, width <= 16_384, height <= 16_384, width * height * 4 <= byteLimit else { return nil }
-        let components: Int
-        switch image.format { case 0: components = 3; case 1: components = 4; case 3: components = 2; case 4: components = 1; default: return nil }
-        guard image.data.count == width * height * components else { return nil }
+        guard width > 0, height > 0, width <= maximumDimension, height <= maximumDimension, width * height * 4 <= byteLimit,
+              let format = Format(rawValue: image.format), image.data.count == width * height * format.components else { return nil }
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: width, height: height, mipmapped: false)
-        descriptor.usage = .shaderRead; descriptor.storageMode = .shared
+        descriptor.usage = .shaderRead
+        descriptor.storageMode = .shared
         guard let texture = device.makeTexture(descriptor: descriptor), texture.allocatedSize <= byteLimit else { return nil }
         let region = MTLRegionMake2D(0, 0, width, height)
-        if components == 4 {
-            image.data.withUnsafeBytes { texture.replace(region: region, mipmapLevel: 0, withBytes: $0.baseAddress!, bytesPerRow: width * 4) }
-        } else {
-            var rgba = [UInt8](repeating: 255, count: width * height * 4)
-            image.data.withUnsafeBytes { (source: UnsafeRawBufferPointer) in
-                for pixel in 0..<(width * height) {
-                    let input = pixel * components, output = pixel * 4
-                    rgba[output] = source[input]
-                    rgba[output + 1] = components == 3 ? source[input + 1] : source[input]
-                    rgba[output + 2] = components == 3 ? source[input + 2] : source[input]
-                    if components == 2 { rgba[output + 3] = source[input + 1] }
-                }
-            }
-            rgba.withUnsafeBytes { texture.replace(region: region, mipmapLevel: 0, withBytes: $0.baseAddress!, bytesPerRow: width * 4) }
-        }
+        let rgba = format == .rgba ? image.data : Self.expandToRGBA(image.data, pixels: width * height, format: format)
+        rgba.withUnsafeBytes { texture.replace(region: region, mipmapLevel: 0, withBytes: $0.baseAddress!, bytesPerRow: width * 4) }
         // A retransmission with the same image ID is new content even when its
         // size is unchanged. Drop its obsolete texture before LRU eviction.
         for old in entries.keys where old.namespace == namespace && old.id == image.id { remove(old) }
-        while byteCount + texture.allocatedSize > byteLimit || entries.count >= 1_024 {
+        while byteCount + texture.allocatedSize > byteLimit || entries.count >= maximumEntries {
             guard let oldest = entries.min(by: { $0.value.used < $1.value.used })?.key else { break }
             remove(oldest)
         }
@@ -85,57 +114,258 @@ private final class TerminalImageTextureCache {
         byteCount += texture.allocatedSize
         return texture
     }
+
+    private static func expandToRGBA(_ data: Data, pixels: Int, format: Format) -> Data {
+        var rgba = Data(repeating: 255, count: pixels * 4)
+        data.withUnsafeBytes { (source: UnsafeRawBufferPointer) in
+            rgba.withUnsafeMutableBytes { (output: UnsafeMutableRawBufferPointer) in
+                for pixel in 0..<pixels {
+                    let input = pixel * format.components, out = pixel * 4
+                    switch format {
+                    case .rgb:
+                        output[out] = source[input]; output[out + 1] = source[input + 1]; output[out + 2] = source[input + 2]
+                    case .grayAlpha:
+                        output[out] = source[input]; output[out + 1] = source[input]; output[out + 2] = source[input]
+                        output[out + 3] = source[input + 1]
+                    case .gray:
+                        output[out] = source[input]; output[out + 1] = source[input]; output[out + 2] = source[input]
+                    case .rgba:
+                        preconditionFailure("RGBA images are uploaded directly")
+                    }
+                }
+            }
+        }
+        return rgba
+    }
 }
 
+/// Glyph bitmaps for one font, size, scale and option set. Monochrome coverage
+/// lives in an R8 texture tinted by the shader; color glyphs get their own
+/// RGBA texture, created only when a color glyph first appears.
 @MainActor
 private final class GlyphAtlas {
     typealias Key = TerminalFontRasterizer.Key
-    struct Entry { let rect: CGRect; let padding: Int; let colored: Bool }
-    let device: MTLDevice
-    let font: NSFont
-    let scale: CGFloat
-    let cell: NSSize
-    private(set) var texture: MTLTexture
-    private var entries: [Key: Entry] = [:]
-    private let rasterizer: TerminalFontRasterizer
-    private var x = 0, y = 0, lineHeight = 0
-    var full = false
-    private let dimension = 2048
+    struct Entry {
+        /// Atlas texel rectangle.
+        let origin: SIMD2<Float>
+        let size: SIMD2<Float>
+        /// Bitmap offset from the cell's top-left corner, in device pixels.
+        let offset: SIMD2<Float>
+        let colored: Bool
+        var isEmpty: Bool { size.x == 0 || size.y == 0 }
+        static let empty = Entry(origin: .zero, size: .zero, offset: .zero, colored: false)
+    }
 
-    init(device: MTLDevice, font: NSFont, scale: CGFloat, cell: NSSize, options: TerminalFontOptions) {
-        self.device = device; self.font = font; self.scale = scale; self.cell = cell
-        rasterizer = TerminalFontRasterizer(font: font, scale: scale, cell: cell, options: options)
-        let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: 2048, height: 2048, mipmapped: false)
-        descriptor.usage = .shaderRead; descriptor.storageMode = .shared
-        texture = device.makeTexture(descriptor: descriptor)!
+    /// Row-by-row rectangle packing with one texel of separation.
+    private struct ShelfPacker {
+        let dimension: Int
+        var x = 0, y = 0, rowHeight = 0
+
+        mutating func place(width: Int, height: Int) -> (x: Int, y: Int)? {
+            guard width < dimension, height < dimension else { return nil }
+            if x + width >= dimension { x = 0; y += rowHeight + 1; rowHeight = 0 }
+            guard y + height < dimension else { return nil }
+            defer { x += width + 1; rowHeight = max(rowHeight, height) }
+            return (x, y)
+        }
+    }
+
+    static let dimension = 2_048
+    private static let maximumEntries = 65_536
+    let device: MTLDevice
+    let rasterizer: TerminalFontRasterizer
+    var metrics: TerminalCellMetrics { rasterizer.metrics }
+    let grayscale: MTLTexture
+    private(set) var color: MTLTexture?
+    private var entries: [Key: Entry] = [:]
+    /// Single-column ASCII, the overwhelmingly common case, skips hashing.
+    private var ascii = [Entry?](repeating: nil, count: 128 * 4)
+    private var grayscalePacker = ShelfPacker(dimension: dimension)
+    private var colorPacker = ShelfPacker(dimension: dimension)
+    /// Once capacity is exhausted, misses cannot fit. Avoid repeatedly
+    /// rasterizing them until the renderer replaces the atlas.
+    private(set) var full = false
+
+    init?(device: MTLDevice, font: NSFont, scale: CGFloat, options: TerminalFontOptions) {
+        self.device = device
+        rasterizer = TerminalFontRasterizer(font: font, scale: scale, options: options)
+        guard let texture = Self.makeTexture(device: device, format: .r8Unorm) else { return nil }
+        grayscale = texture
+    }
+
+    private static func makeTexture(device: MTLDevice, format: MTLPixelFormat) -> MTLTexture? {
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: format, width: dimension, height: dimension, mipmapped: false)
+        descriptor.usage = .shaderRead
+        descriptor.storageMode = .shared
+        return device.makeTexture(descriptor: descriptor)
+    }
+
+    func asciiGlyph(_ byte: UInt8, style: TerminalFontRasterizer.Style) -> Entry? {
+        let slot = Int(byte) * 4 + Int(style.rawValue & 3)
+        if let cached = ascii[slot] { return cached }
+        let key = Key(text: String(UnicodeScalar(byte)), bold: style.contains(.bold), italic: style.contains(.italic))
+        let entry = glyph(key)
+        ascii[slot] = entry
+        return entry
     }
 
     func glyph(_ key: Key) -> Entry? {
         if let cached = entries[key] { return cached }
-        // Once capacity is exhausted, misses cannot fit. Avoid repeatedly
-        // shaping and rasterizing them before the atlas is replaced.
+        // Blank entries take no texels; the key count bounds their memory.
+        if entries.count >= Self.maximumEntries { full = true }
         guard !full else { return nil }
-        guard let bitmap = rasterizer.rasterize(key) else { return nil }
-        let width = bitmap.width, height = bitmap.height
-        guard width < dimension, height < dimension else { full = true; return nil }
-        if x + width >= dimension { x = 0; y += lineHeight + 1; lineHeight = 0 }
-        guard y + height < dimension else { full = true; return nil }
-        bitmap.bytes.withUnsafeBytes { texture.replace(region: MTLRegionMake2D(x, y, width, height), mipmapLevel: 0, withBytes: $0.baseAddress!, bytesPerRow: width * 4) }
-        let rect = CGRect(x: x, y: y, width: width, height: height)
-        let entry = Entry(rect: rect, padding: bitmap.padding, colored: bitmap.colored)
-        entries[key] = entry; x += width + 1; lineHeight = max(lineHeight, height)
+        // An unrenderable or blank glyph is cached as empty, not retried.
+        guard let bitmap = rasterizer.rasterize(key), !bitmap.isEmpty else {
+            entries[key] = .empty
+            return .empty
+        }
+        if bitmap.colored && color == nil { color = Self.makeTexture(device: device, format: .rgba8Unorm) }
+        guard let texture = bitmap.colored ? color : grayscale,
+              let position = bitmap.colored ? colorPacker.place(width: bitmap.width, height: bitmap.height)
+                                            : grayscalePacker.place(width: bitmap.width, height: bitmap.height) else {
+            full = true
+            return nil
+        }
+        bitmap.pixels.withUnsafeBytes {
+            texture.replace(region: MTLRegionMake2D(position.x, position.y, bitmap.width, bitmap.height), mipmapLevel: 0,
+                            withBytes: $0.baseAddress!, bytesPerRow: bitmap.width * bitmap.bytesPerPixel)
+        }
+        let entry = Entry(origin: SIMD2(Float(position.x), Float(position.y)), size: SIMD2(Float(bitmap.width), Float(bitmap.height)),
+                          offset: SIMD2(Float(bitmap.left), Float(bitmap.top)), colored: bitmap.colored)
+        entries[key] = entry
         return entry
+    }
+}
+
+/// Where the grid lands in the drawable, in points.
+private struct GridLayout {
+    let metrics: TerminalCellMetrics
+    let scale: CGFloat
+    /// Uniform scale of non-interactive previews that fit the whole grid.
+    let fit: CGFloat
+    let inset: CGFloat
+    /// Points per device pixel of the grid.
+    var pixel: CGFloat { fit / scale }
+    var cellWidth: CGFloat { CGFloat(metrics.cellWidth) * pixel }
+    var cellHeight: CGFloat { CGFloat(metrics.cellHeight) * pixel }
+
+    func cellRect(column: Int, row: Int, columns: Int = 1) -> CGRect {
+        CGRect(x: inset + CGFloat(column) * cellWidth, y: inset + CGFloat(row) * cellHeight,
+               width: cellWidth * CGFloat(columns), height: cellHeight)
+    }
+
+    /// A horizontal stroke `top` device pixels below the cell's top edge.
+    func stroke(in cell: CGRect, top: Int, height: Int) -> CGRect {
+        CGRect(x: cell.minX, y: cell.minY + CGFloat(top) * pixel, width: cell.width, height: CGFloat(height) * pixel)
+    }
+}
+
+/// Accumulates one frame's quads. A local value avoids class property
+/// exclusivity checks in the per-cell loop.
+private struct QuadBuilder {
+    var backgrounds: [TerminalQuad]
+    var foregrounds: [TerminalQuad]
+    let layout: GridLayout
+
+    mutating func background(_ rect: CGRect, _ color: UInt32, alpha: Float = 1) {
+        backgrounds.append(TerminalQuad(rect, color: premultiplied(color, alpha: alpha)))
+    }
+
+    mutating func solid(_ rect: CGRect, _ color: UInt32, alpha: Float = 1) {
+        foregrounds.append(TerminalQuad(rect, color: premultiplied(color, alpha: alpha)))
+    }
+
+    mutating func glyph(_ entry: GlyphAtlas.Entry, cell: CGRect, color: UInt32) {
+        let pixel = Float(layout.pixel)
+        let origin = SIMD2(Float(cell.minX), Float(cell.minY)) + entry.offset * pixel
+        let size = entry.size * pixel
+        foregrounds.append(TerminalQuad(rect: SIMD4(origin.x, origin.y, size.x, size.y), uv: SIMD4(lowHalf: entry.origin, highHalf: entry.size),
+                                        color: entry.colored ? SIMD4(repeating: 1) : premultiplied(color),
+                                        kind: entry.colored ? .colorGlyph : .glyph))
+    }
+
+    /// Underlines, strikethrough and overline, placed by the font's metrics.
+    mutating func decorations(_ cell: ILCell, in rect: CGRect, foreground: UInt32) {
+        let metrics = layout.metrics, flags = cell.styleFlags
+        // Strokes may extend a quarter cell beyond the grid row, like Ghostty's sprites.
+        let overhang = metrics.cellHeight / 4
+        if flags.contains(.underline) {
+            let color = cell.styleAttributes.contains(.underlineColor) ? cell.underlineColor : foreground
+            let thickness = metrics.underlineThickness
+            let top = min(metrics.underlinePosition, metrics.cellHeight + overhang - thickness)
+            switch cell.underline {
+            case .none, .single:
+                solid(layout.stroke(in: rect, top: top, height: thickness), color)
+            case .double:
+                let top = min(metrics.underlinePosition, metrics.cellHeight + overhang - 2 * thickness)
+                solid(layout.stroke(in: rect, top: top - thickness, height: thickness), color)
+                solid(layout.stroke(in: rect, top: top + thickness, height: thickness), color)
+            case .curly:
+                let amplitude = Int((CGFloat(metrics.cellWidth) / .pi).rounded(.up))
+                let curlTop = min(top, metrics.cellHeight + overhang - amplitude - thickness)
+                pattern(.curlyLine, rect, top: curlTop - thickness / 2, height: amplitude + thickness, thickness: thickness, color: color)
+            case .dotted:
+                let radius = Int((CGFloat(thickness) * 0.7071).rounded(.up))
+                pattern(.dottedLine, rect, top: top + thickness / 2 - radius, height: radius * 2, thickness: thickness, color: color)
+            case .dashed:
+                pattern(.dashedLine, rect, top: top, height: thickness, thickness: thickness, color: color)
+            }
+        }
+        if flags.contains(.strikethrough) {
+            solid(layout.stroke(in: rect, top: metrics.strikethroughPosition, height: metrics.strikethroughThickness), foreground)
+        }
+        if flags.contains(.overline) {
+            solid(layout.stroke(in: rect, top: max(metrics.overlinePosition, -overhang), height: metrics.overlineThickness), foreground)
+        }
+    }
+
+    /// A procedural stroke whose pattern coordinates are device pixels
+    /// relative to the first cell, so every cell repeats the same shape.
+    private mutating func pattern(_ kind: TerminalQuad.Kind, _ cell: CGRect, top: Int, height: Int, thickness: Int, color: UInt32) {
+        let rect = layout.stroke(in: cell, top: top, height: height)
+        let width = Float(cell.width / layout.pixel)
+        foregrounds.append(TerminalQuad(rect: SIMD4(Float(rect.minX), Float(rect.minY), Float(rect.width), Float(rect.height)),
+                                        uv: SIMD4(0, 0, width, Float(height)), color: premultiplied(color), kind: kind,
+                                        thickness: Float(thickness)))
     }
 }
 
 @MainActor
 final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
     static let device = MTLCreateSystemDefaultDevice()
-    private struct AtlasKey: Hashable { let font: String; let size: CGFloat; let scale: CGFloat; let width: CGFloat; let height: CGFloat; let options: TerminalFontOptions }
+    /// Grid inset from the view's top-left corner, in points.
+    nonisolated static let padding: CGFloat = 8
+
+    private struct AtlasKey: Hashable {
+        let font: String
+        let size: CGFloat
+        let scale: CGFloat
+        let options: TerminalFontOptions
+    }
+    private struct ImageDraw {
+        var quad: TerminalQuad
+        let texture: MTLTexture
+        let z: Int32
+    }
+    /// Kitty z-index bands: below cell backgrounds, between backgrounds and
+    /// text, and above text.
+    private enum ImageLayer {
+        static func belowBackgrounds(_ z: Int32) -> Bool { z < Int32.min / 2 }
+        static func belowText(_ z: Int32) -> Bool { z >= Int32.min / 2 && z < 0 }
+        static func aboveText(_ z: Int32) -> Bool { z >= 0 }
+    }
+    private enum SearchColors {
+        static let selectedBackground: UInt32 = 0xe3ba64, selectedForeground: UInt32 = 0x2b2314
+        static let matchBackground: UInt32 = 0x81714d, matchForeground: UInt32 = 0xffffff
+    }
+    /// Runs of ligature symbols are shaped together up to this length.
+    private static let maximumOperatorRun = 24
+
     private static let atlases = TerminalResourcePool<AtlasKey, GlyphAtlas>()
     private static let imageTextures = TerminalImageTextureCache()
     private static var sharedPipeline: MTLRenderPipelineState?
     private static var sharedBackgroundPipeline: MTLRenderPipelineState?
+
     private let engine: TerminalEngine
     private let queue: MTLCommandQueue
     private let pipeline: MTLRenderPipelineState
@@ -143,6 +373,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
     private var buffers: [MTLBuffer?] = [nil, nil, nil]
     private var backgrounds: [TerminalQuad] = []
     private var foregrounds: [TerminalQuad] = []
+    private var operatorBytes: [UInt8] = []
     private var geometryCapacity = TerminalGeometryCapacity()
     private var atlas: GlyphAtlas?
     private var atlasKey: AtlasKey?
@@ -150,58 +381,68 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
     private var presentation = TerminalPresentationState()
     private var textBlink = TerminalTextBlinkState()
     private var textBlinkTimer: Timer?
-    weak var view: MTKView?
-    var fontSize: CGFloat = 13 { didSet { if fontSize != oldValue { invalidateFont() } } }
-    var fontName = "SF Mono" { didSet { if fontName != oldValue { invalidateFont() } } }
-    var fontOptions = TerminalFontOptions.defaults { didSet { if fontOptions != oldValue { invalidateFont() } } }
-    var focused = false
-    var interactive = true
-    var contrastCorrection = true
-    var cursorOn = true
-    var onFrame: ((ILFrame) -> Void)?
     private var contrastCache: [UInt64: UInt32] = [:]
     private var contrastTarget: UInt32?
     private var contrastMinimum: Double?
     private var fontCache: NSFont?
-    private var cellCache: (scale: CGFloat, size: NSSize)?
+    private var metricsCache: (scale: CGFloat, metrics: TerminalCellMetrics)?
     private var displayedGraphics = TerminalGraphicsState()
     private var graphicsNamespace: String?
-    private var imageDraws: [(quad: TerminalQuad, texture: MTLTexture, z: Int32)] = []
+    private var imageDraws: [ImageDraw] = []
+
+    weak var view: MTKView?
+    var fontSize = TerminalFontOptions.defaultFontSize { didSet { if fontSize != oldValue { invalidateFont() } } }
+    var fontName = TerminalFontOptions.defaultFontName { didSet { if fontName != oldValue { invalidateFont() } } }
+    var fontOptions = TerminalFontOptions.defaults { didSet { if fontOptions != oldValue { invalidateFont() } } }
+    var focused = false
+    /// False for scaled previews, which fit the whole grid and draw no cursor outline.
+    var interactive = true
+    var contrastCorrection = true
+    /// The cursor's blink phase, toggled by the surface's blink timer.
+    var cursorOn = true
+    var onFrame: ((ILFrame) -> Void)?
 
     private func invalidateFont() {
-        fontCache = nil; cellCache = nil; atlas = nil; atlasKey = nil
+        fontCache = nil; metricsCache = nil; atlas = nil; atlasKey = nil
     }
 
+    private var backingScale: CGFloat { view?.window?.backingScaleFactor ?? 2 }
+
     var font: NSFont {
-        if let cached = fontCache { return cached }
+        if let fontCache { return fontCache }
         let base = NSFont(name: fontName, size: fontSize) ?? NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
         let resolved = TerminalFontRasterizer.configuredFont(base as CTFont, options: fontOptions) as NSFont
         fontCache = resolved
         return resolved
     }
-    var cell: NSSize {
-        let scale = view?.window?.backingScaleFactor ?? 2
-        if let cached = cellCache, cached.scale == scale { return cached.size }
-        let f = font
-        let width = ("M" as NSString).size(withAttributes: [.font: f]).width
-        // Ghostty rounds grid metrics in device pixels. Fixed half-point cells
-        // put alternate glyphs between pixels on a 1x external display.
-        let result = NSSize(width: max(1, round(width * scale)) / scale,
-                            height: max(1, round((f.ascender - f.descender + f.leading + 3) * scale)) / scale)
-        cellCache = (scale, result)
-        return result
+
+    /// Device-pixel grid metrics at the current backing scale.
+    var metrics: TerminalCellMetrics {
+        let scale = backingScale
+        if let metricsCache, metricsCache.scale == scale { return metricsCache.metrics }
+        let scaled = CTFontCreateCopyWithAttributes(font as CTFont, fontSize * scale, nil, nil)
+        let metrics = TerminalCellMetrics(font: scaled, options: fontOptions)
+        metricsCache = (scale, metrics)
+        return metrics
     }
 
+    /// Cell size in points. Both dimensions are whole device pixels, like
+    /// Ghostty, so glyphs never straddle pixels on 1x or 2x displays.
+    var cell: NSSize { metrics.pointSize(scale: backingScale) }
+
     init?(engine: TerminalEngine, view: MTKView) {
-        guard let device = Self.device, let queue = device.makeCommandQueue() else { return nil }
-        self.engine = engine; self.queue = queue; self.view = view
-        guard let state = Self.makePipeline(device: device, blending: true) else { return nil }
-        pipeline = state
+        guard let device = Self.device, let queue = device.makeCommandQueue(),
+              let pipeline = Self.makePipeline(device: device, blending: true) else { return nil }
+        self.engine = engine; self.queue = queue; self.view = view; self.pipeline = pipeline
         super.init()
-        view.device = device; view.colorPixelFormat = .bgra8Unorm; view.framebufferOnly = true
+        view.device = device
+        view.colorPixelFormat = .bgra8Unorm
+        view.framebufferOnly = true
         // MTKView's display link supplies presentation cadence. PTY throughput is
         // independent: invalidations only mark the latest terminal state dirty.
-        view.isPaused = true; view.enableSetNeedsDisplay = false; view.delegate = self
+        view.isPaused = true
+        view.enableSetNeedsDisplay = false
+        view.delegate = self
         engine.observers[observer] = { [weak self] in self?.requestDraw() }
     }
 
@@ -214,10 +455,14 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         let descriptor = MTLRenderPipelineDescriptor()
         descriptor.vertexFunction = library.makeFunction(name: "terminal_vertex")
         descriptor.fragmentFunction = library.makeFunction(name: "terminal_fragment")
-        let color = descriptor.colorAttachments[0]!
-        color.pixelFormat = .bgra8Unorm; color.isBlendingEnabled = blending
-        color.sourceRGBBlendFactor = .one; color.sourceAlphaBlendFactor = .one
-        color.destinationRGBBlendFactor = .oneMinusSourceAlpha; color.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+        guard let color = descriptor.colorAttachments[0] else { return nil }
+        color.pixelFormat = .bgra8Unorm
+        // Everything is premultiplied: source over destination.
+        color.isBlendingEnabled = blending
+        color.sourceRGBBlendFactor = .one
+        color.sourceAlphaBlendFactor = .one
+        color.destinationRGBBlendFactor = .oneMinusSourceAlpha
+        color.destinationAlphaBlendFactor = .oneMinusSourceAlpha
         guard let state = try? device.makeRenderPipelineState(descriptor: descriptor) else { return nil }
         if blending { sharedPipeline = state } else { sharedBackgroundPipeline = state }
         return state
@@ -227,20 +472,26 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         presentation.cancel()
         updateTextBlink(hasBlinkingText: false, canPresent: false)
         engine.observers.removeValue(forKey: observer)
-        view?.isPaused = true; view?.delegate = nil
+        view?.isPaused = true
+        view?.delegate = nil
         // Committed command buffers retain their resources until GPU completion.
         buffers = [nil, nil, nil]
         backgrounds = []; foregrounds = []; contrastCache = [:]
         atlas = nil; atlasKey = nil
         displayedGraphics = TerminalGraphicsState(); imageDraws = []
-        // The shared cache remains bounded and can be reused by another live
-        // view of the same terminal; command buffers retain in-flight textures.
+        // The shared image cache remains bounded and can be reused by another
+        // live view of the same terminal; command buffers retain in-flight textures.
     }
+
+    // MARK: - Presentation
 
     func requestDraw() {
         guard !presentation.cancelled else { return }
         presentation.invalidate()
-        guard let view else { updateTextBlink(hasBlinkingText: textBlink.hasBlinkingText, canPresent: false); return }
+        guard let view else {
+            updateTextBlink(hasBlinkingText: textBlink.hasBlinkingText, canPresent: false)
+            return
+        }
         guard canPresent(view) else {
             view.isPaused = true
             updateTextBlink(hasBlinkingText: textBlink.hasBlinkingText, canPresent: false)
@@ -259,7 +510,8 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
     private func updateTextBlink(hasBlinkingText: Bool, canPresent: Bool) {
         textBlink.update(hasBlinkingText: hasBlinkingText, canPresent: canPresent)
         guard textBlink.timerRequired, !presentation.cancelled else {
-            textBlinkTimer?.invalidate(); textBlinkTimer = nil
+            textBlinkTimer?.invalidate()
+            textBlinkTimer = nil
             return
         }
         guard textBlinkTimer == nil else { return }
@@ -306,7 +558,8 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                         self.presentation.release(slot)
                         return
                     }
-                    guard abs(CGFloat(drawable.texture.width) - view.drawableSize.width) < 1, abs(CGFloat(drawable.texture.height) - view.drawableSize.height) < 1 else {
+                    guard abs(CGFloat(drawable.texture.width) - view.drawableSize.width) < 1,
+                          abs(CGFloat(drawable.texture.height) - view.drawableSize.height) < 1 else {
                         self.presentation.release(slot)
                         self.requestDraw()
                         return
@@ -317,6 +570,8 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         }
     }
 
+    // MARK: - Frame building
+
     private func render(in view: MTKView, texture: MTLTexture, drawable: CAMetalDrawable?, slot: Int) {
         var committed = false
         defer { if !committed { presentation.release(slot) } }
@@ -324,250 +579,372 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         // afterwards would let hidden views pin images beyond the shared LRU.
         defer { imageDraws.removeAll(keepingCapacity: true) }
         let revision = presentation.requestedRevision
-        guard view.bounds.width > 0, view.bounds.height > 0, let frame = engine.frame(), let cells = frame.cells, let device = Self.device else { return }
+        guard view.bounds.width > 0, view.bounds.height > 0, texture.width > 0, texture.height > 0,
+              let frame = engine.frame(), let cells = frame.cells, let device = Self.device else { return }
         onFrame?(frame)
-        let scale = view.window?.backingScaleFactor ?? 2
-        let cell = self.cell
-        let font = self.font
+        let scale = backingScale
         let theme = engine.theme
-        let minimumContrast = theme.minimumContrast ?? 4.5
-        if contrastTarget != theme.foreground || contrastMinimum != minimumContrast {
-            contrastCache.removeAll(keepingCapacity: true); contrastTarget = theme.foreground; contrastMinimum = minimumContrast
-        }
+        guard let current = currentAtlas(device: device, scale: scale) else { return }
+        let atlas = current.atlas
+        let metrics = atlas.metrics
+        let gridWidth = CGFloat(Int(frame.columns) * metrics.cellWidth) / scale
+        let gridHeight = CGFloat(Int(frame.rows) * metrics.cellHeight) / scale
+        let fit = interactive ? 1 : max(0.01, min(view.bounds.width / (gridWidth + 12), view.bounds.height / (gridHeight + 12)))
+        let layout = GridLayout(metrics: metrics, scale: scale, fit: fit, inset: interactive ? Self.padding : 6 * fit)
+
         // Native full screen windows cannot be transparent on macOS.
         let opacity = view.window?.styleMask.contains(.fullScreen) == true ? 1 : theme.effectiveBackgroundOpacity
-        if let layer = view.layer as? CAMetalLayer, layer.isOpaque != (opacity == 1) { layer.isOpaque = opacity == 1 }
-        let key = AtlasKey(font:font.fontName,size:fontSize,scale:scale,width:cell.width,height:cell.height,options:fontOptions)
-        let replacingFullAtlas = atlasKey == key && atlas?.full == true
-        if atlasKey != key || atlas == nil || replacingFullAtlas {
+        configure(view.layer as? CAMetalLayer, opaque: opacity == 1)
+        prepareImages(frame: frame, layout: layout, bounds: view.bounds, device: device)
+
+        if geometryCapacity.resize(cells: frame.count) {
+            // A large window or overview must not pin its peak geometry after
+            // becoming a small pane. In-flight commands retain their buffers.
+            backgrounds = []; foregrounds = []; buffers = [nil, nil, nil]
+        }
+        var builder = QuadBuilder(backgrounds: [], foregrounds: [], layout: layout)
+        swap(&builder.backgrounds, &backgrounds)
+        swap(&builder.foregrounds, &foregrounds)
+        builder.backgrounds.removeAll(keepingCapacity: true)
+        builder.foregrounds.removeAll(keepingCapacity: true)
+        builder.backgrounds.reserveCapacity(frame.count)
+        builder.foregrounds.reserveCapacity(frame.count)
+        let hasBlinkingText = appendCells(frame: frame, cells: UnsafeBufferPointer(start: cells, count: frame.count),
+                                          atlas: atlas, theme: theme, opacity: opacity, into: &builder)
+        swap(&builder.backgrounds, &backgrounds)
+        swap(&builder.foregrounds, &foregrounds)
+        updateTextBlink(hasBlinkingText: hasBlinkingText, canPresent: true)
+
+        guard encode(frame: frame, atlas: atlas, texture: texture, drawable: drawable, slot: slot, opacity: opacity,
+                     theme: theme, layout: layout, device: device) else { return }
+        committed = true
+        presentation.submitted(revision: revision)
+        // An atlas containing old scrollback glyphs may need one fresh pass.
+        // If the visible glyph set itself cannot fit, endlessly retrying the
+        // same frame consumes a CPU/GPU core without adding any content.
+        if atlas.full && !current.replacedFull { requestDraw() }
+    }
+
+    /// The atlas for the current font and scale, replacing an exhausted one.
+    /// Also reports whether this call replaced an exhausted atlas.
+    private func currentAtlas(device: MTLDevice, scale: CGFloat) -> (atlas: GlyphAtlas, replacedFull: Bool)? {
+        let key = AtlasKey(font: font.fontName, size: fontSize, scale: scale, options: fontOptions)
+        let replacingFull = atlasKey == key && atlas?.full == true
+        if atlasKey != key || atlas == nil || replacingFull {
+            let font = self.font, options = fontOptions
             atlas = Self.atlases.resource(for: key, usable: { !$0.full }) {
-                GlyphAtlas(device: device, font: font, scale: scale, cell: cell, options: fontOptions)
+                GlyphAtlas(device: device, font: font, scale: scale, options: options)
             }
             atlasKey = key
         }
-        guard let atlas else { return }
-        let fit = interactive ? CGFloat(1) : min(view.bounds.width / (CGFloat(frame.columns) * cell.width + 12), view.bounds.height / (CGFloat(frame.rows) * cell.height + 12))
-        let inset: CGFloat = interactive ? 8 : 6 * fit
-        if !engine.graphics.placements.isEmpty || !displayedGraphics.placements.isEmpty || graphicsNamespace != nil {
+        return atlas.map { ($0, replacingFull) }
+    }
+
+    private func configure(_ layer: CAMetalLayer?, opaque: Bool) {
+        guard let layer else { return }
+        if layer.isOpaque != opaque { layer.isOpaque = opaque }
+        // Keep the last frame anchored while a resize waits for the next one,
+        // rather than stretching every glyph.
+        if layer.contentsGravity != .topLeft { layer.contentsGravity = .topLeft }
+        let name = fontOptions.colorspace == .displayP3 ? CGColorSpace.displayP3 : CGColorSpace.sRGB
+        if layer.colorspace?.name != name { layer.colorspace = CGColorSpace(name: name) }
+    }
+
+    /// Builds cell backgrounds, glyphs, decorations and the cursor. Returns
+    /// whether any visible text blinks.
+    private func appendCells(frame: ILFrame, cells: UnsafeBufferPointer<ILCell>, atlas: GlyphAtlas, theme: TerminalTheme,
+                             opacity: Double, into builder: inout QuadBuilder) -> Bool {
+        let layout = builder.layout, metrics = layout.metrics
+        let columns = Int(frame.columns)
+        let cursorVisible = frame.cursorVisible && (!frame.cursorBlinking || cursorOn || !focused)
+        let cursorIndex = Int(frame.cursorRow) * columns + Int(frame.cursorColumn)
+        let cursorWidth = cursorIndex < cells.count ? max(1, Int(cells[cursorIndex].width)) : 1
+        let blockCursor = cursorVisible && focused && frame.cursorShape == .block
+        let shapingCursor = cursorVisible ? TerminalTextRuns.Cursor(row: frame.cursorRow, column: frame.cursorColumn) : nil
+        // Keep a run's bitmap, including its overhang padding, within the atlas.
+        let shapingColumns = max(2, min(64, GlyphAtlas.dimension / metrics.cellWidth - 2))
+        let minimumContrast = theme.minimumContrast ?? 4.5
+        if contrastTarget != theme.foreground || contrastMinimum != minimumContrast {
+            contrastCache.removeAll(keepingCapacity: true)
+            contrastTarget = theme.foreground
+            contrastMinimum = minimumContrast
+        }
+        var contrastMemo: (foreground: UInt32, background: UInt32, result: UInt32)?
+        var hasBlinkingText = false
+
+        func coversCursor(_ cell: ILCell) -> Bool {
+            cursorVisible && cell.row == frame.cursorRow && cell.column == frame.cursorColumn
+        }
+
+        var index = 0
+        while index < cells.count {
+            defer { index += 1 }
+            let cell = cells[index]
+            let flags = cell.styleFlags, attributes = cell.styleAttributes
+
+            // Contextual scripts and ASCII operator ligatures shape several cells at once.
+            var runText: String?
+            var runClusters: [TerminalTextRuns.Cluster] = []
+            var span = 1
+            if let run = TerminalTextRuns.plan(cells, at: index, cursor: shapingCursor, maximumColumns: shapingColumns) {
+                runText = run.text; runClusters = run.clusters; span = run.columns
+                index += run.cellCount - 1
+            } else if let operatorRun = operatorRun(cells, at: index, cursorCovers: coversCursor) {
+                runText = operatorRun.text; span = operatorRun.count
+                index += span - 1
+            }
+
+            let rect = layout.cellRect(column: Int(cell.column), row: Int(cell.row), columns: span)
+            var background = cell.background, foreground = cell.foreground
+            func resolved(_ color: TerminalThemeColor) -> UInt32 {
+                color.resolve(foreground: cell.foreground, background: cell.background,
+                              windowForeground: frame.foreground, windowBackground: frame.background)
+            }
+            if flags.contains(.selected) {
+                background = theme.selectionBackground.map(resolved) ?? theme.accent
+                foreground = theme.selectionForeground.map(resolved) ?? (theme.isLight ? 0xffffff : 0x15191f)
+            } else if flags.contains(.searchSelected) {
+                background = SearchColors.selectedBackground; foreground = SearchColors.selectedForeground
+            } else if flags.contains(.searchMatch) {
+                background = SearchColors.matchBackground; foreground = SearchColors.matchForeground
+            }
+            let underCursor = blockCursor && cell.row == frame.cursorRow
+                && Int(cell.column) >= Int(frame.cursorColumn) && Int(cell.column) < Int(frame.cursorColumn) + cursorWidth
+
+            // Highlights and inverse video stay opaque in translucent windows.
+            let opaqueCell = !flags.isDisjoint(with: .highlights) || attributes.contains(.inverse)
+            if background != frame.background || (opacity < 1 && (opaqueCell || attributes.contains(.explicitBackground))) {
+                let alpha = !opaqueCell && theme.backgroundOpacityCells == true ? Float(opacity) : 1
+                builder.background(rect, background, alpha: alpha)
+            }
+            if underCursor {
+                background = theme.cursorColor.map(resolved) ?? frame.cursorColor
+                foreground = theme.cursorText.map(resolved) ?? frame.background
+            }
+            // Spacer cells of wide characters draw only their background.
+            if cell.width == 0 { continue }
+            let hasDecorations = !flags.isDisjoint(with: .decorations)
+            if attributes.contains(.blink) && !attributes.contains(.invisible) && (!cell.isBlank || hasDecorations) {
+                hasBlinkingText = true
+            }
+            guard textBlink.drawsText(invisible: attributes.contains(.invisible), blinking: attributes.contains(.blink)) else { continue }
+
+            let scalar = cell.firstScalar
+            // Pixel-art programs use block elements as colored geometry. Font
+            // metrics, contrast remapping and atlas bitmaps would all corrupt them.
+            if runText == nil, TerminalBlockElements.range.contains(scalar), cell.isSingleScalar {
+                let alpha = TerminalBlockElements.alpha(scalar)
+                for part in TerminalBlockElements.rects(scalar) {
+                    builder.solid(CGRect(x: rect.minX + part.minX * rect.width, y: rect.minY + part.minY * rect.height,
+                                         width: part.width * rect.width, height: part.height * rect.height), foreground, alpha: alpha)
+                }
+                if hasDecorations { builder.decorations(cell, in: rect, foreground: foreground) }
+                continue
+            }
+
+            let drawsGlyph = runText != nil || !cell.isBlank
+            if contrastCorrection && (drawsGlyph || hasDecorations) && !TerminalCellDrawing.isGraphicsElement(scalar) {
+                if let memo = contrastMemo, memo.foreground == foreground, memo.background == background {
+                    foreground = memo.result
+                } else {
+                    let result = corrected(foreground, against: background, minimumContrast: minimumContrast)
+                    contrastMemo = (foreground, background, result)
+                    foreground = result
+                }
+            }
+            if drawsGlyph, let entry = glyph(for: cell, scalar: scalar, runText: runText, clusters: runClusters, span: span,
+                                              index: index, cells: cells, columns: columns, atlas: atlas), !entry.isEmpty {
+                builder.glyph(entry, cell: rect, color: foreground)
+            }
+            if hasDecorations {
+                let columns = span == 1 ? max(1, Int(cell.width)) : span
+                builder.decorations(cell, in: layout.cellRect(column: Int(cell.column), row: Int(cell.row), columns: columns),
+                                    foreground: foreground)
+            }
+        }
+
+        if cursorVisible {
+            appendCursor(frame: frame, cells: cells, index: cursorIndex, width: cursorWidth, theme: theme, into: &builder)
+        }
+        return hasBlinkingText
+    }
+
+    private func glyph(for cell: ILCell, scalar: UInt32, runText: String?, clusters: [TerminalTextRuns.Cluster], span: Int,
+                       index: Int, cells: UnsafeBufferPointer<ILCell>, columns: Int, atlas: GlyphAtlas) -> GlyphAtlas.Entry? {
+        let flags = cell.styleFlags
+        let style = TerminalFontRasterizer.Style().union(flags.contains(.bold) ? .bold : []).union(flags.contains(.italic) ? .italic : [])
+        if runText == nil && scalar < 0x80 && cell.width == 1 && cell.isSingleScalar {
+            return atlas.asciiGlyph(UInt8(scalar), style: style)
+        }
+        var key = TerminalFontRasterizer.Key(text: runText ?? cell.string, bold: flags.contains(.bold), italic: flags.contains(.italic),
+                                             width: max(span, Int(cell.width)))
+        key.clusters = clusters
+        // A lone Nerd Font icon may grow into a following blank cell, as in
+        // Ghostty. Adjacent icons keep a single-cell constraint.
+        if cell.width == 1 && TerminalFontRasterizer.isPrivateUse(scalar) && !TerminalCellDrawing.isGraphicsElement(scalar),
+           index + 1 < cells.count, Int(cell.column) + 1 < columns, cells[index + 1].isBlank {
+            let previous = cell.column > 0 && index > 0 ? cells[index - 1].firstScalar : 0
+            let previousIsIcon = TerminalFontRasterizer.isPrivateUse(previous) && !TerminalCellDrawing.isGraphicsElement(previous)
+            if !previousIsIcon { key.constraintColumns = 2 }
+        }
+        return atlas.glyph(key)
+    }
+
+    /// ASCII symbols that code fonts join into ligatures, such as `=>`,
+    /// `!==`, `#{` and `__`. Letters stay on the per-cell fast path.
+    private static let ligatureSymbols: [Bool] = {
+        var table = [Bool](repeating: false, count: 128)
+        for byte in "!#%&()*+-./:;<=>?[]^_{|}~".utf8 { table[Int(byte)] = true }
+        return table
+    }()
+
+    /// Adjacent, identically styled ligature symbols shape together.
+    private func operatorRun(_ cells: UnsafeBufferPointer<ILCell>, at start: Int, cursorCovers: (ILCell) -> Bool) -> (text: String, count: Int)? {
+        let first = cells[start]
+        func isOperator(_ cell: ILCell) -> Bool {
+            cell.width == 1 && cell.text.1 == 0 && cell.text.0 > 0 && Self.ligatureSymbols[Int(cell.text.0)] && !cursorCovers(cell)
+        }
+        guard isOperator(first), start + 1 < cells.count else { return nil }
+        operatorBytes.removeAll(keepingCapacity: true)
+        operatorBytes.append(UInt8(bitPattern: first.text.0))
+        while operatorBytes.count < Self.maximumOperatorRun && start + operatorBytes.count < cells.count {
+            let next = cells[start + operatorBytes.count]
+            guard next.row == first.row, Int(next.column) == Int(first.column) + operatorBytes.count,
+                  TerminalTextRuns.sameStyle(first, next), isOperator(next) else { break }
+            operatorBytes.append(UInt8(bitPattern: next.text.0))
+        }
+        guard operatorBytes.count > 1 else { return nil }
+        return (String(decoding: operatorBytes, as: UTF8.self), operatorBytes.count)
+    }
+
+    /// Bar, underline and hollow cursors follow Ghostty's sprites: the bar
+    /// straddles the cell's left edge and full-height cursors keep the font's
+    /// natural height, centered in an adjusted cell. The block cursor is drawn
+    /// behind the cell's text, which the cell loop recolors.
+    private func appendCursor(frame: ILFrame, cells: UnsafeBufferPointer<ILCell>, index: Int, width: Int, theme: TerminalTheme,
+                              into builder: inout QuadBuilder) {
+        let layout = builder.layout, metrics = layout.metrics, pixel = layout.pixel
+        let cursorCell = index < cells.count ? cells[index] : nil
+        let color = theme.cursorColor?.resolve(foreground: cursorCell?.foreground ?? frame.foreground,
+                                               background: cursorCell?.background ?? frame.background,
+                                               windowForeground: frame.foreground, windowBackground: frame.background) ?? frame.cursorColor
+        let cell = layout.cellRect(column: Int(frame.cursorColumn), row: Int(frame.cursorRow), columns: width)
+        let full = CGRect(x: cell.minX, y: cell.minY + CGFloat(metrics.cursorTop) * pixel, width: cell.width,
+                          height: CGFloat(metrics.cursorHeight) * pixel)
+        let thickness = CGFloat(metrics.cursorThickness) * pixel
+        let style: TerminalCursorStyle = focused ? frame.cursorShape : .blockHollow
+        switch style {
+        case .block:
+            builder.background(full, color)
+        case .bar:
+            let offset = CGFloat((metrics.cursorThickness + 1) / 2) * pixel
+            builder.solid(CGRect(x: full.minX - offset, y: full.minY, width: thickness, height: full.height), color)
+        case .underline:
+            let top = min(metrics.underlinePosition, metrics.cellHeight + metrics.cellHeight / 4 - metrics.underlineThickness)
+            builder.solid(layout.stroke(in: cell, top: top, height: metrics.cursorThickness), color)
+        case .blockHollow:
+            // Previews show no cursor unless they hold focus.
+            guard interactive || focused else { return }
+            builder.solid(CGRect(x: full.minX, y: full.minY, width: full.width, height: thickness), color)
+            builder.solid(CGRect(x: full.minX, y: full.maxY - thickness, width: full.width, height: thickness), color)
+            builder.solid(CGRect(x: full.minX, y: full.minY, width: thickness, height: full.height), color)
+            builder.solid(CGRect(x: full.maxX - thickness, y: full.minY, width: thickness, height: full.height), color)
+        }
+    }
+
+    /// Selects the image placements to draw this frame. Image updates obey
+    /// synchronized output just like text.
+    private func prepareImages(frame: ILFrame, layout: GridLayout, bounds: CGRect, device: MTLDevice) {
+        imageDraws.removeAll(keepingCapacity: true)
+        guard !engine.graphics.placements.isEmpty || !displayedGraphics.placements.isEmpty || graphicsNamespace != nil else { return }
         let namespace = engine.blockID + ":" + (engine.replayID ?? engine.stream ?? "local")
         if namespace != graphicsNamespace {
             displayedGraphics = TerminalGraphicsState()
             if let old = graphicsNamespace { Self.imageTextures.prune(namespace: old, images: [:]) }
             graphicsNamespace = namespace
         }
-        // Image side-channel updates must obey synchronized output just like
-        // text. Keep the last submitted scene until the hold ends or expires.
+        // Keep the last submitted scene until a synchronized-output hold ends or expires.
         if il_terminal_render_hold_remaining(engine.handle) <= 0 { displayedGraphics = engine.graphics }
-        imageDraws.removeAll(keepingCapacity: true)
-        if !displayedGraphics.placements.isEmpty {
-            Self.imageTextures.prune(namespace: namespace, images: displayedGraphics.images)
-            for placement in displayedGraphics.placements {
-                guard let image = displayedGraphics.images[placement.imageID],
-                      let quad = Self.imageQuad(placement: placement, image: image, scene: displayedGraphics, frame: frame,
-                        cell: cell, fit: fit, inset: inset, bounds: view.bounds),
-                      let texture = Self.imageTextures.texture(device: device, namespace: namespace, image: image) else { continue }
-                imageDraws.append((quad, texture, placement.z))
-            }
-        } else {
+        guard !displayedGraphics.placements.isEmpty else {
             Self.imageTextures.prune(namespace: namespace, images: [:])
             graphicsNamespace = nil
+            return
         }
+        Self.imageTextures.prune(namespace: namespace, images: displayedGraphics.images)
+        let cell = CGSize(width: CGFloat(layout.metrics.cellWidth) / layout.scale, height: CGFloat(layout.metrics.cellHeight) / layout.scale)
+        for placement in displayedGraphics.placements {
+            guard let image = displayedGraphics.images[placement.imageID],
+                  let quad = Self.imageQuad(placement: placement, image: image, scene: displayedGraphics, frame: frame,
+                                            cell: cell, fit: layout.fit, inset: layout.inset, bounds: bounds),
+                  let texture = Self.imageTextures.texture(device: device, namespace: namespace, image: image) else { continue }
+            imageDraws.append(ImageDraw(quad: quad, texture: texture, z: placement.z))
         }
-        let drawCursor = frame.cursorVisible && (!frame.cursorBlinking || cursorOn || !focused)
-        let cursorIndex = Int(frame.cursorRow) * Int(frame.columns) + Int(frame.cursorColumn)
-        let cursorWidth = cursorIndex < frame.count ? max(1,Int(cells[cursorIndex].width)) : 1
-        if geometryCapacity.resize(cells: frame.count) {
-            // A large window or overview must not pin its peak geometry after
-            // becoming a small pane. In-flight commands retain their buffers.
-            backgrounds = []; foregrounds = []; buffers = [nil, nil, nil]
-        }
-        backgrounds.removeAll(keepingCapacity: true); foregrounds.removeAll(keepingCapacity: true)
-        backgrounds.reserveCapacity(frame.count); foregrounds.reserveCapacity(frame.count)
-        func quad(_ rect: CGRect, _ color: UInt32, alpha: Float = 1) -> TerminalQuad {
-            TerminalQuad(rect: SIMD4(Float(rect.minX),Float(rect.minY),Float(rect.width),Float(rect.height)), uv: .zero, color: Self.rgba(color,alpha:alpha), textured: 0)
-        }
-        func decorations(_ data: ILCell, rect: CGRect, foreground: UInt32, span: Int) {
-            let width = rect.width * CGFloat(span == 1 ? max(1, Int(data.width)) : 1)
-            if data.underlineStyle != 0 {
-                let color = data.attributes & 1 != 0 ? data.underlineColor : foreground
-                if data.underlineStyle == 1 || data.underlineStyle == 2 {
-                    foregrounds.append(quad(CGRect(x: rect.minX, y: rect.maxY - 2 * fit, width: width, height: fit), color))
-                    if data.underlineStyle == 2 {
-                        foregrounds.append(quad(CGRect(x: rect.minX, y: rect.maxY - 4 * fit, width: width, height: fit), color))
-                    }
-                } else {
-                    let height: CGFloat = data.underlineStyle == 3 ? 3 : (data.underlineStyle == 4 ? 1.5 : 1)
-                    let bottomInset: CGFloat = data.underlineStyle == 3 ? 4 : 2
-                    var line = quad(CGRect(x: rect.minX, y: rect.maxY - bottomInset * fit, width: width, height: height * fit), color)
-                    line.textured = UInt32(data.underlineStyle) + 2
-                    // Logical terminal coordinates preserve phase across cells
-                    // and scale the pattern consistently in overview previews.
-                    line.uv = SIMD4(Float(CGFloat(data.column) * cell.width), 0, Float(width / fit), Float(height))
-                    foregrounds.append(line)
-                }
-            }
-            if data.flags & 16 != 0 { foregrounds.append(quad(CGRect(x: rect.minX, y: rect.midY, width: width, height: fit), foreground)) }
-            if data.flags & 32 != 0 { foregrounds.append(quad(CGRect(x: rect.minX, y: rect.minY, width: width, height: fit), foreground)) }
-        }
-        var index = 0
-        var hasBlinkingText = false
-        let cellBuffer = UnsafeBufferPointer(start: cells, count: frame.count)
-        let shapingCursor = drawCursor ? TerminalTextRuns.Cursor(row: frame.cursorRow, column: frame.cursorColumn) : nil
-        let shapingColumns = max(2, min(64, Int((2048 - 4 * ceil(scale) - 1) / (cell.width * scale))))
-        while index < frame.count {
-            defer { index += 1 }
-            var cellData = cells[index]
-            var operatorText: String?
-            var textClusters: [TerminalTextRuns.Cluster] = []
-            var span = 1
-            if let run = TerminalTextRuns.plan(cellBuffer, at: index, cursor: shapingCursor, maximumColumns: shapingColumns) {
-                operatorText = run.text; textClusters = run.clusters; span = run.columns
-                index += run.cellCount - 1
-            } else if cellData.width == 1 && Self.isLigatureOperator(cellData.text.0) && cellData.text.1 == 0,
-               !(drawCursor && frame.cursorRow == cellData.row && frame.cursorColumn == cellData.column) {
-                var text = [UInt8(bitPattern: cellData.text.0)]
-                while span < 24 && index + span < frame.count {
-                    let next = cells[index + span]
-                    guard next.width == 1, next.row == cellData.row, next.column == cellData.column + UInt16(span),
-                          next.foreground == cellData.foreground, next.background == cellData.background, next.flags == cellData.flags,
-                          next.underlineStyle == cellData.underlineStyle, next.underlineColor == cellData.underlineColor, next.attributes == cellData.attributes,
-                          Self.isLigatureOperator(next.text.0), next.text.1 == 0,
-                          !(drawCursor && frame.cursorRow == next.row && frame.cursorColumn == next.column) else { break }
-                    text.append(UInt8(bitPattern: next.text.0)); span += 1
-                }
-                if span > 1 { operatorText = String(bytes:text,encoding:.utf8); index += span - 1 }
-            }
-            let rect = CGRect(x: inset + CGFloat(cellData.column) * cell.width * fit, y: inset + CGFloat(cellData.row) * cell.height * fit, width: cell.width * fit * CGFloat(span), height: cell.height * fit)
-            var bg = cellData.background, fg = cellData.foreground
-            func resolved(_ color: TerminalThemeColor) -> UInt32 {
-                color.resolve(foreground: cellData.foreground, background: cellData.background, windowForeground: frame.foreground, windowBackground: frame.background)
-            }
-            if cellData.flags & 8 != 0 {
-                bg = theme.selectionBackground.map(resolved) ?? theme.accent
-                fg = theme.selectionForeground.map(resolved) ?? (theme.isLight ? 0xffffff : 0x15191f)
-            }
-            else if cellData.flags & 128 != 0 { bg = 0xe3ba64; fg = 0x2b2314 }
-            else if cellData.flags & 64 != 0 { bg = 0x81714d; fg = 0xffffff }
-            let cursorCell = drawCursor && focused && frame.cursorStyle == 1 && cellData.column >= frame.cursorColumn && Int(cellData.column) < Int(frame.cursorColumn) + cursorWidth && cellData.row == frame.cursorRow
-            if cursorCell {
-                bg = theme.cursorColor.map(resolved) ?? frame.cursorColor
-                fg = theme.cursorText.map(resolved) ?? frame.background
-            }
-            let opaqueCell = cellData.flags & (8 | 64 | 128) != 0 || cellData.attributes & 16 != 0 || cursorCell
-            let explicitBackground = cellData.attributes & 8 != 0
-            if bg != frame.background || opacity < 1 && (opaqueCell || explicitBackground) {
-                let alpha = !opaqueCell && theme.backgroundOpacityCells == true ? Float(opacity) : 1
-                backgrounds.append(quad(rect,bg,alpha:alpha))
-            }
-            if cellData.width == 0 { continue }
-            if cellData.attributes & 4 != 0 && cellData.attributes & 2 == 0 &&
-                (cellData.text.0 != 0 && (cellData.text.0 != 32 || cellData.text.1 != 0) || cellData.flags & 52 != 0) {
-                hasBlinkingText = true
-            }
-            if !textBlink.drawsText(attributes: cellData.attributes) { continue }
-            // Pixel-art terminals use block characters as colored geometry. Font metrics,
-            // contrast remapping, and per-color atlas entries all corrupt those images.
-            if cellData.text.0 == -30 && cellData.text.1 == -106 && cellData.text.3 == 0 {
-                let last = UInt8(bitPattern: cellData.text.2)
-                if (0x80...0x9f).contains(last) {
-                    let code = UInt32(last) + 0x2500
-                    if (0x2591...0x2593).contains(code) {
-                        var shade = quad(rect, fg); shade.textured = code - 0x258f
-                        foregrounds.append(shade)
-                    } else {
-                        for part in TerminalCellGeometry.blocks[Int(code - 0x2580)] {
-                            foregrounds.append(quad(CGRect(x:rect.minX + part.minX * rect.width, y:rect.minY + part.minY * rect.height, width:part.width * rect.width, height:part.height * rect.height), fg))
-                        }
-                    }
-                    if cellData.flags & 52 != 0 { decorations(cellData, rect: rect, foreground: fg, span: span) }
-                    continue
-                }
-            }
-            let text = operatorText ?? withUnsafePointer(to: &cellData.text) { pointer in pointer.withMemoryRebound(to: CChar.self, capacity: 128) { String(cString:$0) } }
-            let firstScalar = text.unicodeScalars.first?.value ?? 0
-            if contrastCorrection && (!text.isEmpty && text != " " || cellData.flags & 52 != 0) && !TerminalCellDrawing.isGraphicsElement(firstScalar) { fg = corrected(fg, against:bg) }
-            if !text.isEmpty && text != " " {
-                var key = GlyphAtlas.Key(text:text,bold:cellData.flags & 1 != 0,italic:cellData.flags & 2 != 0,width:max(span,Int(cellData.width)))
-                key.clusters = textClusters
-                if cellData.width == 1 && TerminalFontRasterizer.isPrivateUse(firstScalar) && !TerminalCellDrawing.isGraphicsElement(firstScalar),
-                   index + 1 < frame.count && cellData.column + 1 < frame.columns {
-                    let next = cells[index + 1]
-                    var previousIsSymbol = false
-                    if cellData.column > 0 {
-                        var previous = cells[index - 1]
-                        let scalar = withUnsafePointer(to:&previous.text) { $0.withMemoryRebound(to:CChar.self,capacity:128) { String(cString:$0).unicodeScalars.first?.value ?? 0 } }
-                        previousIsSymbol = TerminalFontRasterizer.isPrivateUse(scalar) && !TerminalCellDrawing.isGraphicsElement(scalar)
-                    }
-                    if !previousIsSymbol && (next.text.0 == 0 || (next.text.0 == 32 && next.text.1 == 0)) { key.constraintWidth = 2 }
-                }
-                if let entry = atlas.glyph(key) {
-                    let glyph = entry.rect
-                    foregrounds.append(TerminalQuad(rect:SIMD4(Float(rect.minX-CGFloat(entry.padding)/scale*fit),Float(rect.minY),Float(glyph.width/scale*fit),Float(glyph.height/scale*fit)),uv:SIMD4(Float(glyph.minX/2048),Float(glyph.minY/2048),Float(glyph.width/2048),Float(glyph.height/2048)),color:entry.colored ? SIMD4(repeating:1) : Self.rgba(fg),textured:interactive ? 1 : 9))
-                }
-            }
-            if cellData.flags & 52 != 0 { decorations(cellData, rect: rect, foreground: fg, span: span) }
-        }
-        updateTextBlink(hasBlinkingText: hasBlinkingText, canPresent: true)
-        if drawCursor {
-            let cursorForeground = cursorIndex < frame.count ? cells[cursorIndex].foreground : frame.foreground
-            let cursorBackground = cursorIndex < frame.count ? cells[cursorIndex].background : frame.background
-            let cursorColor = theme.cursorColor?.resolve(foreground: cursorForeground, background: cursorBackground,
-                windowForeground: frame.foreground, windowBackground: frame.background) ?? frame.cursorColor
-            var rect = CGRect(x:inset+CGFloat(frame.cursorColumn)*cell.width*fit,y:inset+CGFloat(frame.cursorRow)*cell.height*fit,width:cell.width*fit*CGFloat(cursorWidth),height:cell.height*fit)
-            if focused && frame.cursorStyle != 3 {
-                if frame.cursorStyle == 0 { rect.size.width = max(1/scale,1.5*fit);foregrounds.append(quad(rect,cursorColor)) }
-                else if frame.cursorStyle == 2 { rect.origin.y = rect.maxY-2*fit;rect.size.height = 2*fit;foregrounds.append(quad(rect,cursorColor)) }
-            } else if interactive {
-                for edge in [CGRect(x:rect.minX,y:rect.minY,width:rect.width,height:fit), CGRect(x:rect.minX,y:rect.maxY-fit,width:rect.width,height:fit), CGRect(x:rect.minX,y:rect.minY,width:fit,height:rect.height), CGRect(x:rect.maxX-fit,y:rect.minY,width:fit,height:rect.height)] { foregrounds.append(quad(edge,cursorColor,alpha:0.5)) }
-            }
-        }
+    }
+
+    // MARK: - Encoding
+
+    private func encode(frame: ILFrame, atlas: GlyphAtlas, texture: MTLTexture, drawable: CAMetalDrawable?, slot: Int, opacity: Double,
+                        theme: TerminalTheme, layout: GridLayout, device: MTLDevice) -> Bool {
         let quadCount = backgrounds.count + foregrounds.count
         let pass = MTLRenderPassDescriptor()
         pass.colorAttachments[0].texture = texture
         pass.colorAttachments[0].loadAction = .clear
         pass.colorAttachments[0].storeAction = .store
-        pass.colorAttachments[0].clearColor = MTLClearColor(red:Double((frame.background>>16)&255)/255*opacity,green:Double((frame.background>>8)&255)/255*opacity,blue:Double(frame.background&255)/255*opacity,alpha:opacity)
-        let hasBelowBackground = imageDraws.contains { $0.z < Int32.min / 2 }
-        let replaceBackground = opacity < 1 && theme.backgroundOpacityCells == true && !backgrounds.isEmpty && !hasBelowBackground
-        let backgroundPipeline = replaceBackground ? Self.makePipeline(device: device, blending: false) : nil
+        let clear = premultiplied(frame.background, alpha: Float(opacity))
+        pass.colorAttachments[0].clearColor = MTLClearColor(red: Double(clear.x), green: Double(clear.y), blue: Double(clear.z), alpha: Double(clear.w))
+        // Translucent explicit backgrounds replace the clear color. Blending
+        // them over it would apply opacity twice (0.5 -> 0.75).
+        let replaceBackgrounds = opacity < 1 && theme.backgroundOpacityCells == true && !backgrounds.isEmpty
+            && !imageDraws.contains { ImageLayer.belowBackgrounds($0.z) }
+        let backgroundPipeline = replaceBackgrounds ? Self.makePipeline(device: device, blending: false) : pipeline
         // A failed shader cannot leave a half-configured pass or acknowledge a
         // frame that was not drawn. A later invalidation can retry construction.
-        guard !replaceBackground || backgroundPipeline != nil, let command = queue.makeCommandBuffer() else { return }
+        guard let backgroundPipeline, let command = queue.makeCommandBuffer() else { return false }
         let required = max(64, quadCount * MemoryLayout<TerminalQuad>.stride)
-        if buffers[slot] == nil || buffers[slot]!.length < required { buffers[slot] = device.makeBuffer(length:required*2,options:.storageModeShared) }
-        guard let buffer = buffers[slot], let encoder = command.makeRenderCommandEncoder(descriptor:pass) else { return }
-        backgrounds.withUnsafeBytes { if let base = $0.baseAddress { memcpy(buffer.contents(), base, $0.count) } }
-        foregrounds.withUnsafeBytes { if let base = $0.baseAddress { memcpy(buffer.contents().advanced(by: backgrounds.count * MemoryLayout<TerminalQuad>.stride), base, $0.count) } }
-        encoder.setRenderPipelineState(pipeline);encoder.setVertexBuffer(buffer,offset:0,index:0)
+        if (buffers[slot]?.length ?? 0) < required { buffers[slot] = device.makeBuffer(length: required * 2, options: .storageModeShared) }
+        guard let buffer = buffers[slot], let encoder = command.makeRenderCommandEncoder(descriptor: pass) else { return false }
+        backgrounds.withUnsafeBytes { if let base = $0.baseAddress { buffer.contents().copyMemory(from: base, byteCount: $0.count) } }
+        foregrounds.withUnsafeBytes {
+            if let base = $0.baseAddress {
+                buffer.contents().advanced(by: backgrounds.count * MemoryLayout<TerminalQuad>.stride).copyMemory(from: base, byteCount: $0.count)
+            }
+        }
+
         // Drawable dimensions are integral. Using fractional point bounds here
         // stretches every glyph slightly when a split lands between pixels.
-        var viewport = SIMD2(Float(CGFloat(texture.width) / scale),Float(CGFloat(texture.height) / scale));encoder.setVertexBytes(&viewport,length:MemoryLayout<SIMD2<Float>>.stride,index:1)
-        encoder.setFragmentTexture(atlas.texture,index:0)
-        func drawImages(where predicate: (Int32) -> Bool) {
-            for draw in imageDraws where predicate(draw.z) {
+        var uniforms = TerminalUniforms(viewport: SIMD2(Float(CGFloat(texture.width) / layout.scale), Float(CGFloat(texture.height) / layout.scale)),
+                                        cellWidth: Float(layout.metrics.cellWidth), smoothGlyphs: interactive ? 0 : 1)
+        encoder.setRenderPipelineState(pipeline)
+        encoder.setVertexBuffer(buffer, offset: 0, index: 0)
+        encoder.setVertexBytes(&uniforms, length: MemoryLayout<TerminalUniforms>.stride, index: 1)
+        encoder.setFragmentBytes(&uniforms, length: MemoryLayout<TerminalUniforms>.stride, index: 1)
+        // Every declared texture needs a binding; the grayscale atlas stands in.
+        encoder.setFragmentTexture(atlas.grayscale, index: 0)
+        encoder.setFragmentTexture(atlas.color ?? atlas.grayscale, index: 1)
+        encoder.setFragmentTexture(atlas.grayscale, index: 2)
+
+        func drawImages(where layer: (Int32) -> Bool) {
+            var drew = false
+            for draw in imageDraws where layer(draw.z) {
                 var quad = draw.quad
                 encoder.setVertexBytes(&quad, length: MemoryLayout<TerminalQuad>.stride, index: 0)
-                encoder.setFragmentTexture(draw.texture, index: 0)
+                encoder.setFragmentTexture(draw.texture, index: 2)
                 encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6, instanceCount: 1)
+                drew = true
             }
-            encoder.setVertexBuffer(buffer, offset: 0, index: 0)
-            encoder.setFragmentTexture(atlas.texture, index: 0)
+            if drew { encoder.setVertexBuffer(buffer, offset: 0, index: 0) }
         }
-        if imageDraws.isEmpty && !(opacity < 1 && theme.backgroundOpacityCells == true && !backgrounds.isEmpty) {
-            if quadCount > 0 { encoder.drawPrimitives(type:.triangle,vertexStart:0,vertexCount:6,instanceCount:quadCount) }
-        } else {
-        if !imageDraws.isEmpty { drawImages { $0 < Int32.min / 2 } }
-        if let backgroundPipeline {
-            // Replace the clear color for translucent explicit backgrounds.
-            // Blending them over it would apply opacity twice (0.5 -> 0.75).
+        drawImages(where: ImageLayer.belowBackgrounds)
+        if !backgrounds.isEmpty {
             encoder.setRenderPipelineState(backgroundPipeline)
-            encoder.drawPrimitives(type:.triangle,vertexStart:0,vertexCount:6,instanceCount:backgrounds.count)
+            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6, instanceCount: backgrounds.count)
             encoder.setRenderPipelineState(pipeline)
-        } else if !backgrounds.isEmpty { encoder.drawPrimitives(type:.triangle,vertexStart:0,vertexCount:6,instanceCount:backgrounds.count) }
-        if !imageDraws.isEmpty { drawImages { $0 >= Int32.min / 2 && $0 < 0 } }
-        if !foregrounds.isEmpty { encoder.drawPrimitives(type:.triangle,vertexStart:0,vertexCount:6,instanceCount:foregrounds.count,baseInstance:backgrounds.count) }
-        if !imageDraws.isEmpty { drawImages { $0 >= 0 } }
         }
+        drawImages(where: ImageLayer.belowText)
+        if !foregrounds.isEmpty {
+            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6, instanceCount: foregrounds.count, baseInstance: backgrounds.count)
+        }
+        drawImages(where: ImageLayer.aboveText)
         encoder.endEncoding()
         if let drawable {
             command.present(drawable)
@@ -581,50 +958,39 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                 if failed { self.requestDraw() }
             }
         }
-        committed = true
-        presentation.submitted(revision: revision)
         command.commit()
-        // An atlas containing old scrollback glyphs may need one fresh pass.
-        // If the visible glyph set itself cannot fit, endlessly retrying the
-        // same frame consumes a CPU/GPU core without adding any content.
-        if atlas.full && !replacingFullAtlas { requestDraw() }
-    }
-
-    private static func rgba(_ value: UInt32, alpha: Float = 1) -> SIMD4<Float> {
-        SIMD4(Float((value>>16)&255)/255*alpha,Float((value>>8)&255)/255*alpha,Float(value&255)/255*alpha,alpha)
+        return true
     }
 
     private static func imageQuad(placement: WireGraphicsPlacement, image: WireGraphicsImage, scene: TerminalGraphicsState,
                                   frame: ILFrame, cell: CGSize, fit: CGFloat, inset: CGFloat, bounds: CGRect) -> TerminalQuad? {
         guard placement.pixelWidth > 0, placement.pixelHeight > 0, placement.sourceWidth > 0, placement.sourceHeight > 0 else { return nil }
         let xScale = cell.width * fit / CGFloat(scene.cellWidth), yScale = cell.height * fit / CGFloat(scene.cellHeight)
+        // Placement rows count from the bottom of history, so restoring more
+        // scrollback cannot move an image.
         let row = Double(frame.scrollTotal) - Double(frame.rows) + Double(placement.row) - Double(frame.scrollOffset)
         let destination = CGRect(x: inset + CGFloat(placement.column) * cell.width * fit + CGFloat(placement.xOffset) * xScale,
-            y: inset + CGFloat(row) * cell.height * fit + CGFloat(placement.yOffset) * yScale,
-            width: CGFloat(placement.pixelWidth) * xScale, height: CGFloat(placement.pixelHeight) * yScale)
-        let viewport = CGRect(x: inset, y: inset, width: CGFloat(frame.columns) * cell.width * fit, height: CGFloat(frame.rows) * cell.height * fit).intersection(bounds)
+                                 y: inset + CGFloat(row) * cell.height * fit + CGFloat(placement.yOffset) * yScale,
+                                 width: CGFloat(placement.pixelWidth) * xScale, height: CGFloat(placement.pixelHeight) * yScale)
+        let viewport = CGRect(x: inset, y: inset, width: CGFloat(frame.columns) * cell.width * fit,
+                              height: CGFloat(frame.rows) * cell.height * fit).intersection(bounds)
         let clipped = destination.intersection(viewport)
         guard !clipped.isNull, !clipped.isEmpty else { return nil }
-        let sourceWidth = CGFloat(placement.sourceWidth) / CGFloat(image.width), sourceHeight = CGFloat(placement.sourceHeight) / CGFloat(image.height)
+        let sourceWidth = CGFloat(placement.sourceWidth) / CGFloat(image.width)
+        let sourceHeight = CGFloat(placement.sourceHeight) / CGFloat(image.height)
+        let uv = SIMD4(Float(CGFloat(placement.sourceX) / CGFloat(image.width) + (clipped.minX - destination.minX) / destination.width * sourceWidth),
+                       Float(CGFloat(placement.sourceY) / CGFloat(image.height) + (clipped.minY - destination.minY) / destination.height * sourceHeight),
+                       Float(clipped.width / destination.width * sourceWidth), Float(clipped.height / destination.height * sourceHeight))
         return TerminalQuad(rect: SIMD4(Float(clipped.minX), Float(clipped.minY), Float(clipped.width), Float(clipped.height)),
-            uv: SIMD4(Float(CGFloat(placement.sourceX) / CGFloat(image.width) + (clipped.minX - destination.minX) / destination.width * sourceWidth),
-                Float(CGFloat(placement.sourceY) / CGFloat(image.height) + (clipped.minY - destination.minY) / destination.height * sourceHeight),
-                Float(clipped.width / destination.width * sourceWidth), Float(clipped.height / destination.height * sourceHeight)),
-            color: SIMD4(repeating: 1), textured: 8)
+                            uv: uv, color: SIMD4(repeating: 1), kind: .image)
     }
 
-    private static func isLigatureOperator(_ character: CChar) -> Bool {
-        switch character {
-        case 33,37,38,42,43,45,46,47,58,60,61,62,63,94,124,126: return true
-        default: return false
-        }
-    }
-
-    private func corrected(_ foreground: UInt32, against background: UInt32) -> UInt32 {
-        let key = UInt64(foreground)<<32 | UInt64(background)
-        if let cached=contrastCache[key] { return cached }
-        let result = ContrastCorrection.correct(foreground, background:background, target:engine.theme.foreground, minimumContrast:engine.theme.minimumContrast ?? 4.5)
-        if contrastCache.count>8192 { contrastCache.removeAll(keepingCapacity:true) }
-        contrastCache[key]=result;return result
+    private func corrected(_ foreground: UInt32, against background: UInt32, minimumContrast: Double) -> UInt32 {
+        let key = UInt64(foreground) << 32 | UInt64(background)
+        if let cached = contrastCache[key] { return cached }
+        let result = ContrastCorrection.correct(foreground, background: background, target: engine.theme.foreground, minimumContrast: minimumContrast)
+        if contrastCache.count > 8_192 { contrastCache.removeAll(keepingCapacity: true) }
+        contrastCache[key] = result
+        return result
     }
 }

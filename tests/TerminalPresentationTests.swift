@@ -77,15 +77,15 @@ struct TerminalPresentationTests {
         precondition(capacity.resize(cells: 2_500), "Gradual shrinking must eventually release retained capacity")
         var blink = TerminalTextBlinkState()
         blink.update(hasBlinkingText: false, canPresent: true)
-        precondition(!blink.timerRequired && !blink.advance() && blink.drawsText(attributes: 0))
+        precondition(!blink.timerRequired && !blink.advance() && blink.drawsText(invisible: false, blinking: false))
         blink.update(hasBlinkingText: true, canPresent: true)
-        precondition(blink.timerRequired && blink.drawsText(attributes: 4))
-        precondition(blink.advance() && !blink.drawsText(attributes: 4) && blink.drawsText(attributes: 0))
-        precondition(!blink.drawsText(attributes: 2), "Invisible text must stay concealed in both blink phases")
+        precondition(blink.timerRequired && blink.drawsText(invisible: false, blinking: true))
+        precondition(blink.advance() && !blink.drawsText(invisible: false, blinking: true) && blink.drawsText(invisible: false, blinking: false))
+        precondition(!blink.drawsText(invisible: true, blinking: false), "Invisible text must stay concealed in both blink phases")
         blink.update(hasBlinkingText: true, canPresent: false)
         precondition(!blink.timerRequired && !blink.advance() && blink.phaseVisible, "Hidden/occluded surfaces must stop their blink timer")
         blink.update(hasBlinkingText: true, canPresent: true)
-        precondition(blink.timerRequired && blink.drawsText(attributes: 4), "Revealing a surface starts with readable text")
+        precondition(blink.timerRequired && blink.drawsText(invisible: false, blinking: true), "Revealing a surface starts with readable text")
         blink.update(hasBlinkingText: false, canPresent: true)
         precondition(!blink.timerRequired && !blink.advance(), "Removing the last blinking cell must stop scheduling")
         print("Metal presentation: burst coalescing, idle grace, final-frame delivery, bounded drawable acquisition, GPU buffer ownership, retry, cancellation, and shared resource lifetime passed.")
@@ -96,7 +96,7 @@ struct TerminalPresentationTests {
         final class Resource { var usable = true }
         let pool = TerminalResourcePool<Int, Resource>()
         func acquire(_ key: Int) -> Resource {
-            pool.resource(for: key, usable: { $0.usable }, create: { Resource() })
+            pool.resource(for: key, usable: { $0.usable }, create: { Resource() })!
         }
         var active: Resource? = acquire(0)
         weak let first = active

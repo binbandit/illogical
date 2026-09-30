@@ -5,6 +5,6 @@ cd "$ROOT"
 mkdir -p .build/font-clarity
 swiftc -O -import-objc-header illogical/Terminal/Bridge.h \
   illogical/Terminal/TerminalFont.swift illogical/Terminal/TerminalTextRuns.swift \
-  illogical/Terminal/TerminalFontOptions.swift illogical/Terminal/TerminalCellDrawing.swift \
+  illogical/Terminal/TerminalFontOptions.swift illogical/Terminal/TerminalCellDrawing.swift illogical/Terminal/TerminalCellGeometry.swift \
   tests/TerminalFontRasterizationTests.swift -o .build/font-clarity/rasterization-tests
 .build/font-clarity/rasterization-tests
