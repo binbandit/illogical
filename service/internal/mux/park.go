@@ -91,7 +91,7 @@ func (b *Block) wake() error {
 	lost := err != nil
 	if lost {
 		log.Printf("wake %s: %v; continuing with an empty terminal", b.info.ID, err)
-		if t, err = vt.NewTerminal(vt.WithSize(b.info.Cols, b.info.Rows), vt.WithContinuationMaxBytes(1<<20), vt.WithMaxScrollbackBytes(maxScrollback)); err != nil {
+		if t, err = newEmulator(b.info.Cols, b.info.Rows); err != nil {
 			return err
 		}
 	}
@@ -127,7 +127,15 @@ func (b *Block) decodeParked() (*vt.Terminal, error) {
 	if err = d.SetRetainContinuation(true); err != nil {
 		return nil, err
 	}
-	return d.Decode()
+	t, err := d.Decode()
+	if err != nil {
+		return nil, err
+	}
+	if err = restoreModeDefaults(t); err != nil {
+		t.Close()
+		return nil, err
+	}
+	return t, nil
 }
 
 // snapshot encodes the terminal, or reads the parked snapshot.

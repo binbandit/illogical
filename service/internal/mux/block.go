@@ -113,7 +113,7 @@ func (s *Server) newBlock(r Request, id string) (*Block, error) {
 		viewerWake:   make(chan struct{}, 1),
 	}
 	b.replay.epoch = NewID()
-	terminal, err := vt.NewTerminal(vt.WithSize(cols, rows), vt.WithContinuationMaxBytes(1<<20), vt.WithMaxScrollbackBytes(maxScrollback))
+	terminal, err := newEmulator(cols, rows)
 	if err != nil {
 		return nil, err
 	}
@@ -160,6 +160,31 @@ func (b *Block) adoptTerminal(t *vt.Terminal) error {
 	b.installEffects()
 	b.applyTheme()
 	return nil
+}
+
+// newEmulator creates the authoritative terminal state for a block. Grapheme
+// clustering (mode 2027) is on by default, as in Ghostty, so emoji sequences
+// and flags occupy the cells programs expect.
+func newEmulator(cols, rows uint16) (*vt.Terminal, error) {
+	return vt.NewTerminal(
+		vt.WithSize(cols, rows),
+		vt.WithContinuationMaxBytes(1<<20),
+		vt.WithMaxScrollbackBytes(maxScrollback),
+		vt.WithModeDefault(vt.ModeGraphemeCluster, true),
+	)
+}
+
+// restoreModeDefaults reinstates reset defaults on a terminal decoded from a
+// snapshot, keeping whatever mode the running program last selected.
+func restoreModeDefaults(t *vt.Terminal) error {
+	current, err := t.Mode(vt.ModeGraphemeCluster)
+	if err != nil {
+		return err
+	}
+	if err = t.SetModeDefault(vt.ModeGraphemeCluster, true); err != nil {
+		return err
+	}
+	return t.SetMode(vt.ModeGraphemeCluster, current)
 }
 
 // waitForExit reaps the child and reports its status. Unless the block was
