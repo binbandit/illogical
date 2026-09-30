@@ -175,6 +175,12 @@ struct TerminalInputTests {
         engine.keybindings = .ghosttyDefaults
         feed("\u{1b}[>31u")
         check(key(0, "A", "a", .shift) == Data("\u{1b}[97:65;2;65u".utf8), "Kitty alternate and associated text")
+        for _ in 0..<40 { feed("history\r\n") }
+        engine.scrollTo(0)
+        engine.key(event(56, "", "", .shift, type: .flagsChanged), action: .press)
+        check(engine.frame()?.scrollOffset == 0, "A Kitty modifier report does not jump to the bottom")
+        engine.key(event(56, "", "", [], type: .flagsChanged), action: .release)
+        engine.scrollToBottom()
         for (modifiers, action, expected) in [(NSEvent.ModifierFlags.shift, ILKeyAction.press, "\u{1b}[57441;2u"),
                                               (NSEvent.ModifierFlags(), ILKeyAction.release, "\u{1b}[57441;1:3u")] {
             output.removeAll(keepingCapacity: true)

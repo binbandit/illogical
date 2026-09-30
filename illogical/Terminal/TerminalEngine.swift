@@ -769,9 +769,14 @@ final class TerminalEngine {
             return Self.encoded(capacity: 64) { il_terminal_key(handle, &key, $0, $1) }
         }
         guard !data.isEmpty else { return .ignored }
-        // Ghostty's selection-clear-on-typing: any non-modifier key that reaches the program.
-        if event.type != .flagsChanged, action != .release { il_terminal_clear_selection(handle) }
-        send(data)
+        if event.type == .flagsChanged {
+            // Kitty modifier reports neither scroll nor drop the selection, as in Ghostty.
+            write(data)
+        } else {
+            // Ghostty's selection-clear-on-typing and scroll-to-bottom on keystroke.
+            if action != .release { il_terminal_clear_selection(handle) }
+            send(data)
+        }
         return .sent(text: !keyText.isEmpty)
     }
 
