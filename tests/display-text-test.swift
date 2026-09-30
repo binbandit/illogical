@@ -59,7 +59,8 @@ extension MetalTerminalRenderer {
     /// Renders `text` through the production renderer into an offscreen texture.
     @MainActor
     fileprivate static func renderOffscreen(_ text: String, columns: UInt16, rows: UInt16, scale: CGFloat, bounds: CGRect,
-                                            theme: TerminalTheme = .merinoDark, configure: (MetalTerminalRenderer) -> Void = { _ in }) -> Readback {
+                                            theme: TerminalTheme = .merinoDark, thenChange change: ((MetalTerminalRenderer) -> Void)? = nil,
+                                            configure: (MetalTerminalRenderer) -> Void) -> Readback {
         let window = DisplayTextWindow(contentRect: bounds, styleMask: [], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         window.testScale = scale
@@ -78,14 +79,23 @@ extension MetalTerminalRenderer {
         descriptor.usage = [.renderTarget, .shaderRead]
         descriptor.storageMode = .shared
         let output = device!.makeTexture(descriptor: descriptor)!
-        renderer.presentation.invalidate()
-        let slot = renderer.presentation.beginAcquisition()!
-        renderer.presentation.acquired()
-        renderer.render(in: view, texture: output, drawable: nil, slot: slot)
-        let fence = renderer.queue.makeCommandBuffer()!
-        fence.commit()
-        fence.waitUntilCompleted()
-        expect(fence.status == .completed)
+        func frame() {
+            renderer.presentation.invalidate()
+            let slot = renderer.presentation.beginAcquisition()!
+            renderer.presentation.acquired()
+            renderer.render(in: view, texture: output, drawable: nil, slot: slot)
+            let fence = renderer.queue.makeCommandBuffer()!
+            fence.commit()
+            fence.waitUntilCompleted()
+            expect(fence.status == .completed)
+            // Return the buffer slot the completed command held.
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.01))
+        }
+        frame()
+        if let change {
+            change(renderer)
+            frame()
+        }
         var bytes = [UInt8](repeating: 0, count: width * height * 4)
         output.getBytes(&bytes, bytesPerRow: width * 4, from: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0)
         let readback = Readback(bytes: bytes, width: width, height: height, metrics: renderer.metrics, scale: scale)
@@ -225,6 +235,41 @@ extension MetalTerminalRenderer {
         print("Geometry: seamless half blocks, waving undercurl, dotted gaps and per-cell dashes at 1x/2x.")
     }
 
+    /// Changing typography on a live renderer must draw exactly what a fresh
+    /// renderer with those settings draws: no stale atlas, metrics or layer state.
+    @MainActor
+    static func verifyLiveFontChanges() {
+        let e = "\u{1b}["
+        let text = "\(e)?25hHello \(e)1mbold\(e)0m \(e)3mitalic\(e)0m -> ═╗ ▀ \(e)4:3mcurl\(e)0m 中 \u{f115}"
+        var heavy = TerminalFontOptions.defaults
+        heavy.variations = ["wght": 560]
+        heavy.thicken = true
+        heavy.cellHeight = .percent(0.1)
+        heavy.cursorThickness = .pixels(4)
+        heavy.features = ["calt": 0]
+        let changes: [(String, (MetalTerminalRenderer) -> Void)] = [
+            ("family", { $0.fontName = "Menlo" }),
+            ("size", { $0.fontSize = 16 }),
+            ("options", { $0.fontOptions = heavy }),
+            ("everything", { $0.fontName = "Menlo"; $0.fontSize = 11; $0.fontOptions = ownerOptions })
+        ]
+        for scale: CGFloat in [1, 2] {
+            for (name, change) in changes {
+                let bounds = CGRect(x: 0, y: 0, width: 420, height: 60)
+                let fresh = renderOffscreen(text, columns: 40, rows: 2, scale: scale, bounds: bounds) { $0.focused = true; change($0) }
+                let live = renderOffscreen(text, columns: 40, rows: 2, scale: scale, bounds: bounds, thenChange: change) { $0.focused = true }
+                let unchanged = renderOffscreen(text, columns: 40, rows: 2, scale: scale, bounds: bounds) { $0.focused = true }
+                expect(live.bytes != unchanged.bytes, "The \(name) change must be visible")
+                expect(live.metrics == fresh.metrics && live.bytes == fresh.bytes, "Live \(name) change at \(scale)x differs from a fresh renderer")
+            }
+        }
+        let system = CTFontCreateCopyWithAttributes(NSFont.monospacedSystemFont(ofSize: 13, weight: .regular), 26, nil, nil)
+        let axes = (CTFontCopyVariationAxes(system) as? [[String: Any]]) ?? []
+        expect(axes.contains { ($0[kCTFontVariationAxisIdentifierKey as String] as? NSNumber)?.uint32Value == 0x77676874 },
+               "The default system monospace face must expose a weight axis for `variations[\"wght\"]`")
+        print("Live typography: family, size, features, weight, thickening and line height changes match fresh renders at 1x/2x.")
+    }
+
     /// Renders a feature gallery with the owner's configuration for visual
     /// inspection. ILLOGICAL_GALLERY_FONT selects a locally installed font.
     @MainActor
@@ -314,6 +359,7 @@ struct DisplayTextTest {
         MetalTerminalRenderer.verifyCursors()
         MetalTerminalRenderer.verifyGeometry()
         MetalTerminalRenderer.verifyIdlePresentation()
+        MetalTerminalRenderer.verifyLiveFontChanges()
         MetalTerminalRenderer.renderGallery()
     }
 }

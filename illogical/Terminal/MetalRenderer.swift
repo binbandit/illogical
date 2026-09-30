@@ -391,8 +391,8 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
     private var imageDraws: [ImageDraw] = []
 
     weak var view: MTKView?
-    var fontSize: CGFloat = 13 { didSet { if fontSize != oldValue { invalidateFont() } } }
-    var fontName = "SF Mono" { didSet { if fontName != oldValue { invalidateFont() } } }
+    var fontSize = TerminalFontOptions.defaultFontSize { didSet { if fontSize != oldValue { invalidateFont() } } }
+    var fontName = TerminalFontOptions.defaultFontName { didSet { if fontName != oldValue { invalidateFont() } } }
     var fontOptions = TerminalFontOptions.defaults { didSet { if fontOptions != oldValue { invalidateFont() } } }
     var focused = false
     /// False for scaled previews, which fit the whole grid and draw no cursor outline.

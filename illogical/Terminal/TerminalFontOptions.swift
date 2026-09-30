@@ -45,23 +45,24 @@ enum TerminalColorspace: String, Codable, Hashable {
 
 /// Ghostty-compatible text rendering preferences. Font identity (family and
 /// size) is stored separately; everything here changes glyphs or cell metrics.
+/// A plain `TerminalFontOptions()` has Ghostty's defaults; the app's own look
+/// is `TerminalFontOptions.defaults`.
 struct TerminalFontOptions: Codable, Hashable {
     var features: [String: Int] = [:]
+    /// Variable-font axes such as `wght`, applied to the regular face.
     var variations: [String: Double] = [:]
+    /// CoreText font smoothing, which renders glyphs heavier.
     var thicken = false
     var thickenStrength = 255
-    /// Added to the font's natural line height. The app default is roomier
-    /// than Ghostty's; importing a Ghostty config replaces it.
-    var cellHeight = TerminalMetricAdjustment.percent(0.2)
+    /// Added to the font's natural line height.
+    var cellHeight = TerminalMetricAdjustment.none
     /// Added to the 1px base thickness of bar, underline and hollow cursors.
-    var cursorThickness = TerminalMetricAdjustment.pixels(2)
+    var cursorThickness = TerminalMetricAdjustment.none
     /// The shape used until a program selects one with DECSCUSR.
     var cursorStyle = TerminalCursorStyle.block
     /// Whether the default cursor blinks until a program selects otherwise.
-    var cursorBlink = false
+    var cursorBlink = true
     var colorspace = TerminalColorspace.srgb
-
-    static let defaults = TerminalFontOptions()
 
     init(features: [String: Int] = [:], variations: [String: Double] = [:], thicken: Bool = false, thickenStrength: Int = 255) {
         self.features = features
@@ -90,9 +91,6 @@ struct TerminalFontOptions: Codable, Hashable {
     /// from the configuration take Ghostty's defaults, not the app's.
     static func importGhostty(entries: [(String, String)]) -> TerminalFontOptions {
         var options = TerminalFontOptions()
-        options.cellHeight = .none
-        options.cursorThickness = .none
-        options.cursorBlink = true
         for (key, value) in entries {
             switch key {
             case "font-thicken": options.thicken = value == "true"
@@ -141,4 +139,23 @@ struct TerminalFontOptions: Codable, Hashable {
         }
         features[name] = value
     }
+}
+
+/// The app's default terminal look, in one place. Saved preferences and
+/// imported Ghostty settings override it, and every value applies live.
+extension TerminalFontOptions {
+    static let defaultFontName = "SF Mono"
+    static let defaultFontSize: CGFloat = 13
+    static let defaults: TerminalFontOptions = {
+        var options = TerminalFontOptions()
+        // Line height: 20% roomier than the font's own line spacing.
+        options.cellHeight = .percent(0.2)
+        // Glyph weight: `variations["wght"]` on variable fonts (the system
+        // monospace face included), or `thicken` for any font.
+        options.variations = [:]
+        options.thicken = false
+        options.cursorThickness = .pixels(2)
+        options.cursorBlink = false
+        return options
+    }()
 }
