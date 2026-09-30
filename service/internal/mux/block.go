@@ -68,15 +68,10 @@ func (s *Server) newBlock(r Request, id string) (*Block, error) {
 	if err != nil || !stat.IsDir() {
 		return nil, fmt.Errorf("directory is unavailable: %s", cwd)
 	}
+	shell := loginShell()
 	command := r.Command
 	if len(command) == 0 {
-		shell := os.Getenv("SHELL")
-		if shell == "" {
-			shell = "/bin/zsh"
-			if _, err := os.Stat(shell); err != nil {
-				shell = "/bin/sh"
-			}
-		}
+		// A login shell reads the profile files that set PATH and friends.
 		command = []string{shell, "-l"}
 	}
 	cols, rows := r.Cols, r.Rows
@@ -103,9 +98,7 @@ func (s *Server) newBlock(r Request, id string) (*Block, error) {
 	b.installEffects()
 	b.cmd = exec.Command(command[0], command[1:]...)
 	b.cmd.Dir = cwd
-	b.cmd.Env = cleanEnvironment(os.Environ())
-	executable, _ := os.Executable()
-	b.cmd.Env = append(b.cmd.Env, "TERM=xterm-256color", "COLORTERM=truecolor", "TERM_PROGRAM=illogical", "ILLOGICAL_BLOCK="+id, "ILLOGICAL_SOCKET="+s.socket, "ILLOGICAL_HOME="+s.directory, "PATH="+filepath.Dir(executable)+":"+os.Getenv("PATH"))
+	b.cmd.Env = s.childEnvironment(id, shell)
 	if err = s.prepareLoginCommand(b.cmd); err != nil {
 		b.terminal.Close()
 		return nil, err
@@ -162,19 +155,6 @@ func (b *Block) event(m Message) {
 	m.Type, m.Block = "event", b.info.ID
 	m.Session, m.Window = b.info.Session, b.info.Window
 	b.server.broadcastEvent(m)
-}
-
-func cleanEnvironment(env []string) []string {
-	result := make([]string, 0, len(env))
-	for _, v := range env {
-		key, _, _ := strings.Cut(v, "=")
-		switch key {
-		case "TERM", "COLORTERM", "TERM_PROGRAM", "ILLOGICAL_BLOCK", "ILLOGICAL_SOCKET", "ILLOGICAL_HOME", "PATH":
-			continue
-		}
-		result = append(result, v)
-	}
-	return result
 }
 
 // Only the authoritative emulator answers terminal queries. Client replicas

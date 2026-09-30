@@ -16,7 +16,8 @@ if [ ! -f .build/ghostty/lib/libghostty-vt.a ]; then ./scripts/bootstrap.sh; fi
 rm -rf "$STAGING" "$STAGING.tar.gz"
 mkdir -p "$STAGING/bin" "$STAGING/share/illogical"
 PKG_CONFIG_PATH="$ROOT/.build/ghostty/share/pkgconfig" CGO_ENABLED=1 \
-    go -C service build -trimpath -o "$STAGING/bin/illogical" ./cmd/illogical
+    go -C service build -trimpath -ldflags "-X illogical/internal/mux.Version=$VERSION" \
+    -o "$STAGING/bin/illogical" ./cmd/illogical
 
 # The Linux compile closure differs from the app's, so its notices replace the
 # macOS Go module set the way the Nix package does.
