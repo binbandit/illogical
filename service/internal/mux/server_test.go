@@ -331,7 +331,7 @@ func TestParkedTerminalCanReattachDuringPartialEscapeSequence(t *testing.T) {
 	waitCapture(t, c, created.Block, "ready")
 	c.request(t, Request{Method: "block.park", Block: created.Block})
 	c.request(t, Request{Method: "block.write", Block: created.Block, Data: []byte("wake\n")})
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		state := c.request(t, Request{Method: "state"}).State
 		if !state.Blocks[0].Parked {

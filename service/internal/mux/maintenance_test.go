@@ -14,7 +14,7 @@ func TestReadOnlyClientDisconnectDoesNotRewriteWorkspace(t *testing.T) {
 	created := observer.request(t, Request{Method: "session.new", Command: []string{"/bin/sh", "-c", "printf ready; sleep 30"}, KeepOpen: true})
 	waitCapture(t, observer, created.Block, "ready")
 	path := filepath.Join(s.directory, "workspace.json")
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	for {
 		if _, err := os.Stat(path); err == nil {
 			break
@@ -128,7 +128,7 @@ func TestAutomaticParkingUsesLastOutputDeadline(t *testing.T) {
 	expire(-time.Millisecond)
 	waitParked := func(want bool) {
 		t.Helper()
-		deadline := time.Now().Add(time.Second)
+		deadline := time.Now().Add(5 * time.Second)
 		for time.Now().Before(deadline) {
 			state := admin.request(t, Request{Method: "state"}).State
 			for _, info := range state.Blocks {

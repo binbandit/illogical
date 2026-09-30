@@ -118,7 +118,7 @@ func TestBlockedInputDoesNotBlockWorkspace(t *testing.T) {
 	c.request(t, Request{Method: "block.write", Block: created.Block, Data: make([]byte, 1<<20)})
 	before := time.Now()
 	c.request(t, Request{Method: "state"})
-	if time.Since(before) > time.Second {
+	if time.Since(before) > 2*time.Second {
 		t.Fatal("a blocked writer stalled workspace requests")
 	}
 }

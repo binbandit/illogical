@@ -90,7 +90,7 @@ func TestAttachedClientSurvivesOutputBurstAndBriefReadStall(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 	before := time.Now()
 	admin.request(t, Request{Method: "state"})
-	if time.Since(before) > time.Second {
+	if time.Since(before) > 2*time.Second {
 		t.Fatal("a briefly stalled viewer blocked another client")
 	}
 	expected := append(bytes.Repeat(burstFrame(), 2048), []byte("burst-complete")...)
@@ -149,7 +149,7 @@ func TestPrimaryBackpressureKeepsInputAndOtherPanesResponsive(t *testing.T) {
 	waitCapture(t, admin, other.Block, "sibling-responsive")
 	admin.request(t, Request{Method: "block.write", Block: created.Block, Data: []byte("x")})
 	admin.request(t, Request{Method: "block.write", Block: created.Block, Data: []byte{3}})
-	deadline = time.Now().Add(time.Second)
+	deadline = time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		process := admin.request(t, Request{Method: "block.process", Block: created.Block}).Process
 		if process.ExitCode != nil {

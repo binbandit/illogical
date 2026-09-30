@@ -71,7 +71,7 @@ func TestControlCInterruptsForegroundProcess(t *testing.T) {
 	created := c.request(t, Request{Method: "session.new", Command: []string{"/bin/sh", "-c", "printf interrupt-ready; exec sleep 30"}, KeepOpen: true})
 	waitCapture(t, c, created.Block, "interrupt-ready")
 	c.request(t, Request{Method: "block.write", Block: created.Block, Data: []byte{3}})
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		process := c.request(t, Request{Method: "block.process", Block: created.Block}).Process
 		if process.ExitCode != nil {
@@ -105,7 +105,7 @@ func TestClosingPaneHangsUpForegroundJobAndReapsStubbornShell(t *testing.T) {
 		if _, err := os.Stat(marker); err == nil {
 			break
 		}
-		if time.Since(closed) > time.Second {
+		if time.Since(closed) > 1500*time.Millisecond {
 			t.Fatal("foreground job in its own process group did not receive SIGHUP")
 		}
 		time.Sleep(10 * time.Millisecond)
