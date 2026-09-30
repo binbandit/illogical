@@ -1,32 +1,32 @@
 package mux
 
-import "time"
+import (
+	"errors"
+	"time"
+)
 
-func (s *Server) resetTerminal(r Request) Message {
-	s.mu.Lock()
-	b := s.blocks[r.Block]
-	s.mu.Unlock()
-	if b == nil {
-		return Message{Type: "error", Error: "terminal block not found"}
-	}
+// reset clears the terminal like RIS without restarting its process. Output
+// must be at a parser boundary first, so a reset during an unfinished escape
+// sequence waits briefly for it to end and otherwise resynchronizes replicas.
+func (b *Block) reset() error {
 	b.mu.Lock()
 	if b.closed {
 		b.mu.Unlock()
-		return Message{Type: "error", Error: "terminal is closed"}
+		return errBlockClosed
 	}
 	if err := b.wake(); err != nil {
 		b.mu.Unlock()
-		return Message{Type: "error", Error: err.Error()}
+		return err
 	}
 	ground, err := b.terminal.VTGround()
 	if err != nil {
 		b.mu.Unlock()
-		return Message{Type: "error", Error: err.Error()}
+		return err
 	}
 	if ground {
 		b.finishReset(false)
 		b.mu.Unlock()
-		return Message{}
+		return nil
 	}
 	pending := b.resetPending
 	if pending == nil {
@@ -50,18 +50,19 @@ func (s *Server) resetTerminal(r Request) Message {
 	b.mu.Unlock()
 	select {
 	case <-pending:
-		return Message{}
+		return nil
 	case <-b.done:
-		return Message{Type: "error", Error: "terminal closed during reset"}
+		return errors.New("terminal closed during reset")
 	}
 }
 
-// Called with b.mu held. The timeout route replaces replicas from a coherent
-// snapshot because injecting bytes into an unfinished parser is ambiguous.
+// finishReset completes a reset. Caller holds b.mu. The timeout route
+// replaces replicas from a snapshot, because injecting bytes into an
+// unfinished parser has no well-defined result.
 func (b *Block) finishReset(resync bool) {
 	if resync {
 		b.replay.invalidate()
-		b.terminal.VTWrite([]byte{0x18})
+		b.terminal.VTWrite([]byte{0x18}) // CAN aborts the pending sequence.
 		b.terminal.Reset()
 	} else {
 		data := []byte("\x1bc")
@@ -69,32 +70,17 @@ func (b *Block) finishReset(resync bool) {
 		b.publishMutation(Message{Type: "output", Data: data})
 	}
 	b.applyTheme()
-	// An explicit reset discards both screen registries, allowing parking again.
-	oldGraphics := b.graphics.retained || len(b.graphics.scene.Placements) > 0
+	// A reset discards both screens' images, so the block may park again.
+	hadGraphics := b.graphics.retained || len(b.graphics.scene.Placements) > 0
 	b.graphics = graphicsTracker{}
 	_ = b.terminal.SetContinuationMaxBytes(1 << 20)
 	_ = b.configureGraphics()
-	if oldGraphics && !resync {
+	if hadGraphics && !resync {
 		b.publishMutation(Message{Type: "graphics", Graphics: b.graphicsSnapshot()})
 	}
 	b.server.parkingChanged()
 	if resync {
-		b.server.clientsMu.RLock()
-		viewers := make([]*client, 0, len(b.server.clients))
-		for _, c := range b.server.clients {
-			viewers = append(viewers, c)
-		}
-		b.server.clientsMu.RUnlock()
-		for _, c := range viewers {
-			c.mu.Lock()
-			attached := c.subscriptions[b.info.ID] != ""
-			c.mu.Unlock()
-			if attached {
-				if err := b.server.attach(c, b, ""); err != nil {
-					c.send(Message{Type: "error", Block: b.info.ID, Error: "reset snapshot: " + err.Error()})
-				}
-			}
-		}
+		b.resyncViewers("")
 	}
 	if pending := b.resetPending; pending != nil {
 		b.resetPending = nil
@@ -102,6 +88,8 @@ func (b *Block) finishReset(resync bool) {
 	}
 }
 
+// writeOutput feeds PTY output to the emulator and attached replicas.
+// Caller holds b.mu.
 func (b *Block) writeOutput(data []byte) {
 	if b.resetPending != nil {
 		consumed, err := b.terminal.VTWriteUntilGround(data)

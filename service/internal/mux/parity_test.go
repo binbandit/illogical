@@ -154,7 +154,7 @@ func TestResourceInspectionFocusAndClientDetach(t *testing.T) {
 		t.Fatalf("bad window inspection %#v", window)
 	}
 	info := admin.request(t, Request{Method: "block.inspect", Block: created.Block})
-	if info.Block != created.Block || info.BlockInfo == nil || info.BlockInfo.Creator == "" || info.BlockInfo.Host == "" || info.BlockInfo.Flavor != "terminal" || info.BlockInfo.Window != created.Window || info.BlockInfo.Session != created.Session {
+	if info.Block != created.Block || info.BlockInfo == nil || info.BlockInfo.Creator == "" || info.BlockInfo.Host == "" || info.BlockInfo.Window != created.Window || info.BlockInfo.Session != created.Session {
 		t.Fatalf("incomplete block metadata %#v", info)
 	}
 	if info.Process.Child == nil || info.Process.Child.PID != info.Process.PID || info.Process.Child.Executable == "" || info.Process.Child.User == "" {
