@@ -36,6 +36,10 @@ type client struct {
 
 const writeTimeout = 15 * time.Second
 
+// features lets clients gate newer requests when talking to an older service,
+// such as a remote host that has not been upgraded.
+var features = []string{"viewport", "replay", "graphics", "theme-events", "client-focus", "clear", "window-move"}
+
 func (s *Server) serve(conn net.Conn) {
 	c := &client{id: NewID(), conn: conn, connectedAt: time.Now(), kind: "protocol", out: newMessageQueue(), done: make(chan struct{}), subscriptions: map[string]string{}}
 	s.clientsMu.Lock()
@@ -44,7 +48,7 @@ func (s *Server) serve(conn net.Conn) {
 	s.stateChanged()
 	defer s.disconnect(c)
 	go s.writeLoop(c)
-	c.send(Message{Type: "hello", Protocol: ProtocolVersion, Engine: EngineVersion, Client: c.id, Features: []string{"viewport", "replay", "graphics", "theme-events", "client-focus"}})
+	c.send(Message{Type: "hello", Protocol: ProtocolVersion, Engine: EngineVersion, Client: c.id, Features: features})
 	scanner := bufio.NewScanner(conn)
 	scanner.Buffer(make([]byte, 64<<10), 16<<20)
 	for scanner.Scan() {
