@@ -331,7 +331,7 @@ private struct QuadBuilder {
 final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
     static let device = MTLCreateSystemDefaultDevice()
     /// Grid inset from the view's top-left corner, in points.
-    static let padding: CGFloat = 8
+    nonisolated static let padding: CGFloat = 8
 
     private struct AtlasKey: Hashable {
         let font: String
