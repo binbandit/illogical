@@ -161,9 +161,11 @@ final class WorkspaceModel {
 
     func isConnected(_ host: String) -> Bool { connections[host] != nil && statuses[host] == nil && states[host] != nil }
 
-    func supportsViewportSync(host: String? = nil) -> Bool {
-        hostFeatures[host ?? selectedHost]?.contains("viewport") == true
+    func supports(_ feature: String, host: String? = nil) -> Bool {
+        hostFeatures[host ?? selectedHost]?.contains(feature) == true
     }
+
+    func supportsViewportSync(host: String? = nil) -> Bool { supports(WireFeature.viewport, host: host) }
 
     /// Sessions that can be shown: those with at least one tab.
     func sessions(on host: String) -> [Session] { states[host]?.sessions.filter(\.hasTabs) ?? [] }
@@ -297,8 +299,11 @@ final class WorkspaceModel {
 
     private func greet(_ hello: WireMessage, from host: String) {
         onLaunchStage?("serviceHello")
-        guard hello.protocol == 1, hello.engine == "ghostty-27e8b3fa85d9" else {
-            statuses[host] = "This host needs the same version of illogical as this Mac."
+        guard hello.protocol == WireCompatibility.protocolVersion, hello.engine == WireCompatibility.engine else {
+            let name = hosts.first { $0.id == host }?.name ?? "This host"
+            statuses[host] = "\(name) runs a different illogical build (terminal engine \(hello.engine ?? "unknown"), "
+                + "protocol \(hello.protocol.map(String.init) ?? "unknown")). Install the same illogical version as this Mac there, "
+                + "then reconnect."
             connections[host]?.close()
             return
         }
@@ -899,6 +904,22 @@ final class WorkspaceModel {
     func equalizePanes() {
         guard let deck = activeDeck else { return }
         for change in deck.root.equalizedRatios() { resizeSplit(change.split, ratio: change.ratio, deck: deck.id) }
+    }
+
+    /// Option-Shift-Command-[ and ]: swaps the tab with its neighbour.
+    func moveTab(_ offset: Int) {
+        guard let tabs = activeSession?.windows, let index = tabs.firstIndex(where: { $0.id == selectedDeck }),
+              tabs.indices.contains(index + offset) else { return }
+        guard supports(WireFeature.windowMove) else { show("Moving tabs needs a newer illogical service on \(activeHost.name).");return }
+        perform(WireRequest(method: .windowMove, window: selectedDeck, target: tabs[index + offset].id))
+    }
+
+    /// Option-Command-K: erases the screen and scrollback like Ghostty's
+    /// clear_screen. The service redraws the prompt when a shell is waiting.
+    func clearScreen() {
+        guard !focusedBlock.isEmpty else { return }
+        guard supports(WireFeature.clear) else { show("Clearing needs a newer illogical service on \(activeHost.name).");return }
+        perform(WireRequest(method: .blockClear, block: focusedBlock))
     }
 
     // MARK: Font size

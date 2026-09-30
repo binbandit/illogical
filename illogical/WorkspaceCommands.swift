@@ -6,12 +6,12 @@ import SwiftUI
 enum WorkspaceCommand: String, CaseIterable, Identifiable {
     case newWindow, newSession, newTab, goToDirectory
     case closePane, closeTab, closeWindow, closeAllWindows, closeSession
-    case find, findNext, findPrevious
+    case find, findNext, findPrevious, clearScreen
     case toggleVerticalTabs, togglePaneTitles, showAllTabs, sessionOverview
     case biggerText, smallerText, actualSize
     case scrollToTop, scrollToBottom, pageUp, pageDown, toggleFullScreen
     case switchSession, commandPalette, renameSession, chooseTheme, importGhosttyThemes, addRemoteHost, settings
-    case nextTab, previousTab, renameTab
+    case nextTab, previousTab, moveTabLeft, moveTabRight, renameTab
     case splitRight, splitDown, zoomPane, nextPane, previousPane, equalizePanes
 
     var id: String { rawValue }
@@ -30,6 +30,7 @@ enum WorkspaceCommand: String, CaseIterable, Identifiable {
         case .find: "Find…"
         case .findNext: "Find Next"
         case .findPrevious: "Find Previous"
+        case .clearScreen: "Clear Screen and Scrollback"
         case .toggleVerticalTabs: "Vertical Tabs"
         case .togglePaneTitles: "Pane Titles"
         case .showAllTabs: "Show All Tabs"
@@ -51,6 +52,8 @@ enum WorkspaceCommand: String, CaseIterable, Identifiable {
         case .settings: "Settings…"
         case .nextTab: "Show Next Tab"
         case .previousTab: "Show Previous Tab"
+        case .moveTabLeft: "Move Tab Left"
+        case .moveTabRight: "Move Tab Right"
         case .renameTab: "Rename Tab…"
         case .splitRight: "Split Right"
         case .splitDown: "Split Down"
@@ -79,6 +82,7 @@ enum WorkspaceCommand: String, CaseIterable, Identifiable {
         case .goToDirectory: "folder"
         case .closePane, .closeTab, .closeWindow, .closeAllWindows, .closeSession: "xmark"
         case .find, .findNext, .findPrevious: "magnifyingglass"
+        case .clearScreen: "eraser"
         case .toggleVerticalTabs: "sidebar.left"
         case .togglePaneTitles: "text.alignleft"
         case .showAllTabs: "rectangle.grid.1x2"
@@ -98,6 +102,8 @@ enum WorkspaceCommand: String, CaseIterable, Identifiable {
         case .settings: "slider.horizontal.3"
         case .nextTab: "arrow.right"
         case .previousTab: "arrow.left"
+        case .moveTabLeft: "arrow.left.to.line"
+        case .moveTabRight: "arrow.right.to.line"
         case .splitRight: "rectangle.split.2x1"
         case .splitDown: "rectangle.split.1x2"
         case .zoomPane: "arrow.up.left.and.arrow.down.right"
@@ -129,6 +135,7 @@ enum WorkspaceCommand: String, CaseIterable, Identifiable {
         case .closeAllWindows: KeyboardShortcut("w", modifiers: [.command, .option, .shift])
         case .find: KeyboardShortcut("f")
         case .findNext: KeyboardShortcut("g")
+        case .clearScreen: KeyboardShortcut("k", modifiers: [.command, .option])
         case .toggleVerticalTabs: KeyboardShortcut("s", modifiers: [.command, .shift])
         case .showAllTabs: KeyboardShortcut("\\", modifiers: [.command, .shift])
         case .sessionOverview: KeyboardShortcut("o", modifiers: [.command, .shift])
@@ -147,6 +154,8 @@ enum WorkspaceCommand: String, CaseIterable, Identifiable {
         case .settings: KeyboardShortcut(",")
         case .nextTab: KeyboardShortcut("]", modifiers: [.command, .shift])
         case .previousTab: KeyboardShortcut("[", modifiers: [.command, .shift])
+        case .moveTabLeft: KeyboardShortcut("[", modifiers: [.command, .option, .shift])
+        case .moveTabRight: KeyboardShortcut("]", modifiers: [.command, .option, .shift])
         case .splitRight: KeyboardShortcut("d")
         case .splitDown: KeyboardShortcut("d", modifiers: [.command, .shift])
         case .zoomPane: KeyboardShortcut(.return, modifiers: [.command, .shift])
@@ -192,6 +201,7 @@ enum WorkspaceCommand: String, CaseIterable, Identifiable {
         case .find: model?.find()
         case .findNext: model?.findNext(1)
         case .findPrevious: model?.findNext(-1)
+        case .clearScreen: model?.clearScreen()
         case .toggleVerticalTabs: preferences.verticalTabs.toggle()
         case .togglePaneTitles: preferences.showPaneTitles.toggle()
         case .showAllTabs: model?.togglePeek(1)
@@ -213,6 +223,8 @@ enum WorkspaceCommand: String, CaseIterable, Identifiable {
         case .settings: context.openSettings()
         case .nextTab: model?.selectAdjacentTab(1)
         case .previousTab: model?.selectAdjacentTab(-1)
+        case .moveTabLeft: model?.moveTab(-1)
+        case .moveTabRight: model?.moveTab(1)
         case .renameTab: model?.beginRenameTab()
         case .splitRight: model?.split(.horizontal)
         case .splitDown: model?.split(.vertical)
@@ -307,6 +319,8 @@ struct WorkspaceCommands: Commands {
         }
         CommandGroup(after: .textEditing) {
             Menu("Find") { items(.find, .findNext, .findPrevious) }
+            Divider()
+            item(.clearScreen)
         }
         CommandGroup(before: .toolbar) {
             Toggle(WorkspaceCommand.toggleVerticalTabs.title, isOn: Binding(get: { Preferences.shared.verticalTabs },
@@ -332,6 +346,7 @@ struct WorkspaceCommands: Commands {
         }
         CommandMenu("Tab") {
             items(.nextTab, .previousTab)
+            items(.moveTabLeft, .moveTabRight)
             Menu("Select Tab") {
                 ForEach(0..<9) { index in
                     Button(index == 8 ? "Last Tab" : "Tab \(index + 1)") { model?.selectTab(index) }

@@ -21,9 +21,8 @@ nonisolated final class ServicePeer: @unchecked Sendable {
         let data: Data?
     }
 
-    static let hello = #"{"type":"hello","protocol":1,"engine":"ghostty-27e8b3fa85d9","features":["viewport"]}"#
-
     let path: String
+    private let hello: String
     private let lock = NSLock()
     private var requests: [Request] = []
     private var peers: [Int32] = []
@@ -34,10 +33,12 @@ nonisolated final class ServicePeer: @unchecked Sendable {
     var received: [Request] { lock.withLock { requests } }
     var connections: Int { lock.withLock { accepted } }
 
-    /// `state` is the JSON object sent as the initial workspace state.
-    init(name: String, state: String) {
+    /// `state` is the JSON object sent as the initial workspace state;
+    /// `features` are the capabilities announced in hello.
+    init(name: String, state: String, features: [String] = ["viewport"]) {
         path = "/tmp/ilg-\(name)-\(getpid()).sock"
         stateJSON = state
+        hello = #"{"type":"hello","protocol":1,"engine":"ghostty-27e8b3fa85d9","features":[\#(features.map { "\"\($0)\"" }.joined(separator: ","))]}"#
         unlink(path)
         let listener = path.withCString { il_resource_listen($0) }
         guard listener >= 0 else { Self.fail("could not listen on \(path)") }
@@ -81,7 +82,7 @@ nonisolated final class ServicePeer: @unchecked Sendable {
             var enabled: Int32 = 1
             setsockopt(descriptor, SOL_SOCKET, SO_NOSIGPIPE, &enabled, socklen_t(MemoryLayout.size(ofValue: enabled)))
             let state = lock.withLock { () -> String in accepted += 1; return stateJSON }
-            write(Self.hello, to: descriptor)
+            write(hello, to: descriptor)
             write(#"{"type":"state","state":"# + state + "}", to: descriptor)
             lock.withLock { peers.append(descriptor) }
             Thread.detachNewThread {

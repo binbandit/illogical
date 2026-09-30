@@ -3,6 +3,21 @@ import Foundation
 // The JSON-lines contract with the illogical service. Field names and values
 // must stay compatible with service/internal/mux/protocol.go.
 
+/// What a service must report in its hello for this client to use it.
+nonisolated enum WireCompatibility {
+    static let protocolVersion = 1
+    /// Terminal state is exchanged as engine snapshots, so both ends must
+    /// run the same libghostty build.
+    static let engine = "ghostty-27e8b3fa85d9"
+}
+
+/// Optional service capabilities announced in hello `features`.
+nonisolated enum WireFeature {
+    static let viewport = "viewport"
+    static let clear = "clear"
+    static let windowMove = "window-move"
+}
+
 /// A service method name. Literal-constructible so tests and other layers can
 /// name methods this file does not list.
 nonisolated struct WireMethod: RawRepresentable, Hashable, Encodable, Sendable, ExpressibleByStringInterpolation {
@@ -25,6 +40,7 @@ nonisolated struct WireMethod: RawRepresentable, Hashable, Encodable, Sendable, 
     static let windowRename: WireMethod = "window.rename"
     static let windowKill: WireMethod = "window.kill"
     static let windowZoom: WireMethod = "window.zoom"
+    static let windowMove: WireMethod = "window.move"
     static let layoutResize: WireMethod = "layout.resize"
     static let directoryList: WireMethod = "directory.list"
     static let blockSplit: WireMethod = "block.split"
@@ -38,6 +54,7 @@ nonisolated struct WireMethod: RawRepresentable, Hashable, Encodable, Sendable, 
     static let blockEvent: WireMethod = "block.event"
     static let blockTheme: WireMethod = "block.theme"
     static let blockViewport: WireMethod = "block.viewport"
+    static let blockClear: WireMethod = "block.clear"
 }
 
 /// How a split arranges its two children. `horizontal` places them side by

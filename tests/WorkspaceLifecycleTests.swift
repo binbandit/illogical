@@ -20,6 +20,7 @@ struct WorkspaceLifecycleTests {
         windowIntents()
         oneSessionPerWindow()
         closeConfirmation()
+        serviceFeatures()
         print("Workspace lifecycle: focus after close, neighbour tabs, session-end window close, restore/new-window intents, one session per window and close confirmation passed.")
     }
 
@@ -172,6 +173,36 @@ struct WorkspaceLifecycleTests {
         Check.that(second.pickerSessions.map(\.key.session) == ["a", "b"], "Using a session in its window makes it most recent")
         first.close()
         second.close()
+    }
+
+    /// Clear Screen and Move Tab use newer service methods, and explain
+    /// themselves on services that lack them.
+    static func serviceFeatures() {
+        let tabs = ["one", "two", "three"].map { F.tab($0, F.leaf("p-\($0)")) }
+        let state = F.state(1, sessions: [F.session("s", tabs)], blocks: ["p-one", "p-two", "p-three"])
+        let current = ServicePeer(name: "lifecycle-features", state: state, features: ["viewport", "clear", "window-move"])
+        let model = connect(current)
+        model.choose(deck: "two", session: "s", host: "local")
+        model.moveTab(1)
+        model.moveTab(-1)
+        model.clearScreen()
+        Check.eventually("Move Tab and Clear Screen reach the service") {
+            current.requests("window.move").count == 2 && current.requests("block.clear").count == 1
+        }
+        let moves = current.requests("window.move")
+        Check.that(moves.map(\.window) == ["two", "two"] && moves.map(\.target) == ["three", "one"], "A tab moves onto its neighbour's place")
+        Check.that(current.requests("block.clear")[0].block == "p-two", "Clear Screen targets the focused pane")
+        model.choose(deck: "three")
+        model.moveTab(1)
+        Check.settle()
+        Check.that(current.requests("window.move").count == 2, "The last tab cannot move right")
+        model.close()
+
+        let older = ServicePeer(name: "lifecycle-old", state: state)
+        let old = connect(older)
+        old.clearScreen()
+        Check.that(old.notice?.message.contains("newer illogical service") == true, "An older service explains what is missing")
+        old.close()
     }
 
     static func closeConfirmation() {
