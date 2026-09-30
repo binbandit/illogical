@@ -21,10 +21,20 @@ struct TerminalSearchContrastTests {
         precondition(counts.last?.0 == 0 && counts.last?.1 == 0 && counts.last?.2 == -1 && geometries.last == [])
         precondition(engine.frame()?.searchCount == 0)
 
+        engine.setDefaultCursor(style: .bar, blinks: false)
+        precondition(engine.frame()?.cursorStyle == ILCursorStyle.bar.rawValue && engine.frame()?.cursorBlinking == false,
+                     "The configured cursor applies before any program output")
+        let steady = Data("\u{1b}[2 q".utf8)
+        steady.withUnsafeBytes { il_terminal_feed(engine.handle, $0.bindMemory(to: UInt8.self).baseAddress, steady.count) }
+        precondition(engine.frame()?.cursorStyle == ILCursorStyle.block.rawValue, "A program's DECSCUSR wins")
+        let reset = Data("\u{1b}[0 q".utf8)
+        reset.withUnsafeBytes { il_terminal_feed(engine.handle, $0.bindMemory(to: UInt8.self).baseAddress, reset.count) }
+        precondition(engine.frame()?.cursorStyle == ILCursorStyle.bar.rawValue, "Resetting DECSCUSR returns to the configured cursor")
         engine.search("audit-marker"); _ = engine.frame()
         let ready = try Data(contentsOf: URL(fileURLWithPath: ".build/tests/search-contrast/snapshot-ready.bin"))
         engine.receive(WireMessage(type: "snapshot", stream: "new-reconnection", data: ready, cols: 120, rows: 12))
         precondition(engine.frame()?.searchCount == 1 && counts.last?.0 == 1, "Snapshot replacement must restore the active query")
+        precondition(engine.frame()?.cursorStyle == ILCursorStyle.bar.rawValue, "Snapshot replacement keeps the configured cursor")
         precondition(geometries.last?.count == 1)
         var firstListenerUpdate: [TerminalSearchSpan]?
         engine.onSearchGeometry = { firstListenerUpdate = $0 }
@@ -43,7 +53,7 @@ struct TerminalSearchContrastTests {
         precondition(spans == [TerminalSearchSpan(row: 0, startColumn: 0, endColumn: 19), TerminalSearchSpan(row: 1, startColumn: 0, endColumn: 2)])
         wrapped.scrollTo(1); _ = wrapped.frame()
         precondition(spans == [TerminalSearchSpan(row: 0, startColumn: 0, endColumn: 2)])
-        wrapped.scrollBottom(); _ = wrapped.frame()
+        wrapped.scrollToBottom(); _ = wrapped.frame()
         precondition(spans.isEmpty)
         print("Search engine: immediate clear, reconnect query restoration, independent pane queries, remount publication, and clipped/wrapped selected geometry passed.")
 

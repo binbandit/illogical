@@ -35,7 +35,8 @@ int main(void){
             ghostty_key_event_set_key(event,keys[i].key);ghostty_key_event_set_action(event,GHOSTTY_KEY_ACTION_PRESS);
             char actual[128],expected[128];size_t want=0;
             assert(ghostty_key_encoder_encode(reference,event,expected,sizeof(expected),&want)==GHOSTTY_SUCCESS);
-            size_t n=il_terminal_key(t,keys[i].code,0,0,1,"",0,0,actual,sizeof(actual));
+            ILKeyEvent key={.keyCode=keys[i].code,.action=ILKeyActionPress};
+            size_t n=il_terminal_key(t,&key,actual,sizeof(actual));
             assert(n==want && !memcmp(actual,expected,n));
             if(i<8)assert(n>0);
             ghostty_key_event_free(event);
