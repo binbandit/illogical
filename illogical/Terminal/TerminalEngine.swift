@@ -343,6 +343,8 @@ final class TerminalEngine {
     /// Which Option keys act as Alt, like Ghostty's `macos-option-as-alt`.
     var optionAsAlt: ILOptionAsAlt = .disabled
     var keybindings = TerminalKeybindings.shared
+    /// The cursor shown until a program picks one; nil keeps Ghostty's block.
+    private(set) var defaultCursor: (style: ILCursorStyle, blinks: Bool)?
 
     private var canResume = false
     private var requestedCellSize: (UInt32, UInt32)?
@@ -459,6 +461,7 @@ final class TerminalEngine {
         requestedSize = nil
         loadingHistory = true
         if !lastSearch.isEmpty { runSearch(lastSearch, navigation: .next) }
+        applyDefaultCursor()
         if let serviceTheme { applyServiceTheme(serviceTheme) } else { applyTheme(theme) }
         if var preserved { il_terminal_restore_view(handle, &preserved) }
         return true
@@ -584,7 +587,20 @@ final class TerminalEngine {
         for observer in Array(observers.values) { observer() }
     }
 
-    // MARK: Themes
+    // MARK: Appearance
+
+    /// Ghostty's `cursor-style` and `cursor-style-blink`, kept across snapshot restores.
+    func setDefaultCursor(style: ILCursorStyle, blinks: Bool) {
+        guard defaultCursor?.style != style || defaultCursor?.blinks != blinks else { return }
+        defaultCursor = (style, blinks)
+        applyDefaultCursor()
+        notify()
+    }
+
+    private func applyDefaultCursor() {
+        guard let defaultCursor else { return }
+        il_terminal_set_default_cursor(handle, defaultCursor.style, defaultCursor.blinks)
+    }
 
     func applyTheme(_ theme: TerminalTheme) {
         serviceTheme = nil

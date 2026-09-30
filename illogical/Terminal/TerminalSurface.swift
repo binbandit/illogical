@@ -153,6 +153,8 @@ struct TerminalSurface: NSViewRepresentable {
         renderer?.fontSize = fontSize
         renderer?.fontName = fontName
         renderer?.fontOptions = fontOptions
+        engine.setDefaultCursor(style: ILCursorStyle(rawValue: Int32(fontOptions.cursorStyle.rawValue)) ?? .block,
+                                blinks: fontOptions.cursorBlink)
         renderer?.interactive = interactive
         renderer?.contrastCorrection = contrast
         renderer?.focused = focused

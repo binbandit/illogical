@@ -34,8 +34,10 @@ _Static_assert((int)ILMouseActionPress == GHOSTTY_MOUSE_ACTION_PRESS && (int)ILM
 _Static_assert((int)ILMouseButtonLeft == GHOSTTY_MOUSE_BUTTON_LEFT && (int)ILMouseButtonWheelUp == GHOSTTY_MOUSE_BUTTON_FOUR &&
                (int)ILMouseButtonEleven == GHOSTTY_MOUSE_BUTTON_ELEVEN, "ILMouseButton must match GhosttyMouseButton");
 _Static_assert((int)ILCursorStyleBar == GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_BAR &&
-               (int)ILCursorStyleBlockHollow == GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_BLOCK_HOLLOW,
-               "ILCursorStyle must match Ghostty's cursor visual style");
+               (int)ILCursorStyleBlockHollow == GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_BLOCK_HOLLOW &&
+               (int)ILCursorStyleBar == GHOSTTY_TERMINAL_CURSOR_STYLE_BAR &&
+               (int)ILCursorStyleBlockHollow == GHOSTTY_TERMINAL_CURSOR_STYLE_BLOCK_HOLLOW,
+               "ILCursorStyle must match Ghostty's cursor styles");
 
 // MARK: - Process and socket helpers
 
@@ -677,6 +679,14 @@ void il_terminal_theme_override(ILTerminal *t, const uint32_t *background, const
     if (palette)
         for (int i = 0; i < 256; i++) colors[i] = unpack(palette[i]);
     ghostty_terminal_set(t->terminal, GHOSTTY_TERMINAL_OPT_COLOR_PALETTE, palette ? &colors : NULL);
+}
+
+void il_terminal_set_default_cursor(ILTerminal *t, ILCursorStyle style, bool blink) {
+    if (!t) return;
+    // Ghostty applies these at once unless a program chose its own cursor.
+    GhosttyTerminalCursorStyle cursor = (GhosttyTerminalCursorStyle)style;
+    ghostty_terminal_set(t->terminal, GHOSTTY_TERMINAL_OPT_DEFAULT_CURSOR_STYLE, &cursor);
+    ghostty_terminal_set(t->terminal, GHOSTTY_TERMINAL_OPT_DEFAULT_CURSOR_BLINK, &blink);
 }
 
 bool il_terminal_default_palette(ILTerminal *t, uint32_t *palette) {

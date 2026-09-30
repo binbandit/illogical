@@ -125,6 +125,9 @@ void il_terminal_theme(ILTerminal *terminal, uint32_t background, uint32_t foreg
 /// Palette is NULL for the built-in palette, or exactly 256 packed RGB values.
 void il_terminal_theme_override(ILTerminal *terminal, const uint32_t *background, const uint32_t *foreground, const uint32_t *cursor, const uint32_t *palette);
 bool il_terminal_default_palette(ILTerminal *terminal, uint32_t *palette);
+/// The cursor shown until a program selects one with DECSCUSR, and after it
+/// resets with `CSI 0 SP q` (Ghostty's `cursor-style` and `cursor-style-blink`).
+void il_terminal_set_default_cursor(ILTerminal *terminal, ILCursorStyle style, bool blink);
 
 // MARK: - Viewport
 
