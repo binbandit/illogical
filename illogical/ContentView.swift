@@ -493,6 +493,7 @@ private struct WindowSetup: NSViewRepresentable {
             model.onRequestActivation = { [weak window] in
                 window?.makeKeyAndOrderFront(nil);NSApp.activate(ignoringOtherApps: true)
             }
+            model.onRequestClose = { [weak window] in window?.close() }
             token = NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) { [weak self] _ in MainActor.assumeIsolated { self?.model.close() } }
         }
         isolated deinit { if let token { NotificationCenter.default.removeObserver(token) } }

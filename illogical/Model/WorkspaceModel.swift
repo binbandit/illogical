@@ -49,6 +49,24 @@ private extension SplitLayout {
         }
         return best?.block
     }
+
+    /// The pane that takes over when `block` leaves this layout: the nearest
+    /// surviving leaf of its sibling subtree, widening to ancestors' siblings.
+    func successor(of block: String, surviving: Set<String>) -> String? {
+        func path(_ node: SplitLayout) -> [(node: SplitLayout, removedFirst: Bool)]? {
+            if node.block == block { return [] }
+            guard let first = node.first, let second = node.second else { return nil }
+            if let rest = path(first) { return [(node, true)] + rest }
+            if let rest = path(second) { return [(node, false)] + rest }
+            return nil
+        }
+        for (node, removedFirst) in (path(self) ?? []).reversed() {
+            guard let sibling = removedFirst ? node.second : node.first else { continue }
+            let leaves = sibling.blocks.filter(surviving.contains)
+            if let pick = removedFirst ? leaves.first : leaves.last { return pick }
+        }
+        return nil
+    }
 }
 
 @MainActor
@@ -139,7 +157,6 @@ final class WorkspaceModel: ObservableObject {
     private var connections: [String: ServiceConnection] = [:]
     private var engines: [String: TerminalEngine] = [:]
     private var engineHosts: [String: String] = [:]
-    private var initialized = Set<String>()
     private var rememberedDecks: [String: [String: String]] = [:]
     private var rememberedBlocks: [String: [String: String]] = [:]
     private struct DirectoryContext: Equatable {
@@ -157,8 +174,14 @@ final class WorkspaceModel: ObservableObject {
     private var closingBlocks = Set<String>()
     private var pendingPaneNavigation: (host: String, session: String, deck: String, block: String, request: String)?
     private var renameContext: (host: String, session: String, window: String?)?
+    /// Hosts whose connection has greeted but not yet published a state.
+    private var awaitingInitialState = Set<String>()
+    /// Most recently used sessions first, as "host/session" keys.
+    private var sessionHistory: [String] = []
     var onLaunchStage: ((String) -> Void)?
     var onRequestActivation: (() -> Void)?
+    /// Asks the window to close once no terminal remains to show.
+    var onRequestClose: (() -> Void)?
 
     init() {
         let defaults=UserDefaults.standard
@@ -225,6 +248,7 @@ final class WorkspaceModel: ObservableObject {
             onLaunchStage?("serviceHello")
             guard message.protocol==1,message.engine=="ghostty-27e8b3fa85d9" else{statuses[host]="This host needs the same version of illogical as this Mac.";connections[host]?.close();return}
             statuses[host]=nil
+            awaitingInitialState.insert(host)
             hostFeatures[host] = Set(message.features ?? [])
             send(WireRequest(method:"watch"),host:host)
             for (id,engineHost) in engineHosts where engineHost==host { send(engines[id]?.attachmentRequest() ?? WireRequest(method:"block.attach",block:id),host:host) }
@@ -236,30 +260,22 @@ final class WorkspaceModel: ObservableObject {
         if let state=message.state {
             onLaunchStage?("workspaceState")
             refreshProcessIdentities(state, host: host)
+            let previous = states[host]
             states[host]=state
+            if let previous { rememberSuccessors(from: previous, to: state, host: host) }
             if let pending = pendingPaneNavigation, pending.host == host {
                 let deck = state.sessions.first { $0.id == pending.session }?.windows.first { $0.id == pending.deck }
                 if deck?.zoomed == pending.block, selectedHost == host, selectedSession == pending.session, selectedDeck == pending.deck { focus(pending.block) }
                 if deck?.zoomed == pending.block || deck?.root.blocks.contains(pending.block) != true { pendingPaneNavigation = nil }
             }
             let valid=Set(state.blocks.map(\.id))
-            if let remembered = rememberedBlocks[host] { rememberedBlocks[host] = remembered.filter { valid.contains($0.value) } }
             discardEngines(engineHosts.compactMap { $0.value == host && !valid.contains($0.key) ? $0.key : nil })
-            if !initialized.contains(host) {
-                initialized.insert(host)
-                if state.sessions.isEmpty && host=="local" { newSession(host:host);return }
-            }
+            let initial = awaitingInitialState.remove(host) != nil
+            if initial && host == "local" && !state.sessions.contains(where: { !$0.windows.isEmpty }) { newSession(host: host);return }
             if host==selectedHost {
                 if let pendingBlock, valid.contains(pendingBlock) { self.pendingBlock = nil; focus(pendingBlock) }
                 if pendingBlock != nil { return }
-                if let session=state.sessions.first(where:{$0.id==selectedSession}) {
-                    if !session.windows.contains(where:{$0.id==selectedDeck}){selectedDeck=session.windows.first?.id ?? ""}
-                    if let deck=activeDeck {
-                        let preferred = preferredBlock(in: deck)
-                        if focusedBlock != preferred { focus(preferred, explicit: false) }
-                    }
-                } else if let first=state.sessions.first { choose(session:first.id,host:host,explicit:false) }
-                else { selectedSession="";selectedDeck="";focusedBlock="" }
+                reconcileSelection(previous: initial ? nil : previous, state: state, host: host)
             }
             if palette == .directory && !directoryContextIsCurrent { palette = nil }
         }
@@ -284,6 +300,75 @@ final class WorkspaceModel: ObservableObject {
             if message.event=="clipboard_written",block==focusedBlock,let data=message.data,let text=String(data:data,encoding:.utf8){NSPasteboard.general.clearContents();NSPasteboard.general.setString(text,forType:.string)}
         }
         if let error=message.error,!error.isEmpty{notice=error}
+    }
+
+    /// Keeps the selection on something visible after the service removed
+    /// what was selected: a neighbouring tab, then the most recently used
+    /// session, and finally closing the window when nothing remains.
+    private func reconcileSelection(previous: WorkspaceState?, state: WorkspaceState, host: String) {
+        if let session = state.sessions.first(where: { $0.id == selectedSession }), !session.windows.isEmpty {
+            if !session.windows.contains(where: { $0.id == selectedDeck }) {
+                let oldIndex = previous?.sessions.first { $0.id == selectedSession }?.windows.firstIndex { $0.id == selectedDeck } ?? 0
+                selectedDeck = session.windows[min(oldIndex, session.windows.count - 1)].id
+                rememberedDecks[host, default: [:]][selectedSession] = selectedDeck
+                saveSelection()
+            }
+            if let deck = activeDeck {
+                let preferred = preferredBlock(in: deck)
+                if focusedBlock != preferred { focus(preferred, explicit: false) }
+            }
+            return
+        }
+        let wasShown = previous?.sessions.contains { $0.id == selectedSession && !$0.windows.isEmpty } == true
+        if let fallback = mostRecentSession() {
+            choose(session: fallback.session, host: fallback.host, explicit: wasShown)
+        } else {
+            selectedSession = "";selectedDeck = "";focusedBlock = ""
+            if wasShown { onRequestClose?() }
+        }
+    }
+
+    /// The most recently used session that still has tabs, preferring the
+    /// selected host, then any other host in history, then any session.
+    private func mostRecentSession() -> (host: String, session: String)? {
+        func available(_ host: String, _ session: String) -> Bool {
+            states[host]?.sessions.contains { $0.id == session && !$0.windows.isEmpty } == true
+        }
+        let history = sessionHistory.compactMap { key -> (host: String, session: String)? in
+            let parts = key.split(separator: "/", maxSplits: 1).map(String.init)
+            return parts.count == 2 && available(parts[0], parts[1]) ? (parts[0], parts[1]) : nil
+        }
+        if let match = history.first(where: { $0.host == selectedHost }) ?? history.first { return match }
+        for host in [selectedHost] + hosts.map(\.id) {
+            if let session = states[host]?.sessions.first(where: { !$0.windows.isEmpty }) { return (host, session.id) }
+        }
+        return nil
+    }
+
+    private func recordSessionUse(host: String, session: String) {
+        guard !session.isEmpty else { return }
+        let key = host + "/" + session
+        sessionHistory.removeAll { $0 == key }
+        sessionHistory.insert(key, at: 0)
+    }
+
+    /// Replaces remembered panes that left their tab with the pane that took
+    /// over their space, so returning to a tab focuses a sensible neighbour.
+    private func rememberSuccessors(from previous: WorkspaceState, to state: WorkspaceState, host: String) {
+        let surviving = Set(state.blocks.map(\.id))
+        let oldDecks = Dictionary(previous.sessions.flatMap(\.windows).map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let newDecks = Dictionary(state.sessions.flatMap(\.windows).map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        var remembered = rememberedBlocks[host] ?? [:]
+        if host == selectedHost, !focusedBlock.isEmpty, oldDecks[selectedDeck]?.root.blocks.contains(focusedBlock) == true {
+            remembered[selectedDeck] = focusedBlock
+        }
+        for (deckID, block) in remembered {
+            guard let deck = newDecks[deckID] else { remembered.removeValue(forKey: deckID);continue }
+            let current = Set(deck.root.blocks).intersection(surviving)
+            guard !current.contains(block) else { continue }
+            remembered[deckID] = oldDecks[deckID]?.root.successor(of: block, surviving: current)
+        }
+        rememberedBlocks[host] = remembered
     }
 
     func send(_ request:WireRequest,host:String?=nil,completion:((WireMessage)->Void)?=nil){connections[host ?? selectedHost]?.send(request,completion:completion)}
@@ -387,6 +472,7 @@ final class WorkspaceModel: ObservableObject {
     func choose(session:String,host:String,explicit:Bool = true) {
         pendingPaneNavigation = nil
         selectedHost=host;selectedSession=session
+        recordSessionUse(host: host, session: session)
         let available=states[host]?.sessions.first{$0.id==session}?.windows ?? []
         selectedDeck=available.first{$0.id==rememberedDecks[host]?[session]}?.id ?? available.first?.id ?? ""
         palette=nil;isPeekGestureActive=false;peek=0
@@ -478,7 +564,7 @@ final class WorkspaceModel: ObservableObject {
     private func created(_ message:WireMessage,host:String) {
         guard message.error==nil else{return}
         selectedHost=host
-        if let session=message.session{selectedSession=session}
+        if let session=message.session{selectedSession=session;recordSessionUse(host: host, session: session)}
         if let window=message.window{selectedDeck=window;rememberedDecks[host, default: [:]][selectedSession]=window}
         if let block=message.block{focusedBlock=block;pendingBlock=block}
         saveSelection();palette=nil;isPeekGestureActive=false;peek=0;focusToken=UUID();keyboardFocusIntent=focusToken
@@ -676,7 +762,7 @@ final class WorkspaceModel: ObservableObject {
         connections[host.id]?.close();connections.removeValue(forKey:host.id)
         discardEngines(Array(Set(engineHosts.compactMap { $0.value == host.id ? $0.key : nil } + (states[host.id]?.blocks.map(\.id) ?? []))))
         rememberedDecks.removeValue(forKey: host.id);rememberedBlocks.removeValue(forKey: host.id)
-        initialized.remove(host.id)
+        awaitingInitialState.remove(host.id)
         states.removeValue(forKey:host.id);statuses.removeValue(forKey:host.id);hostFeatures.removeValue(forKey:host.id)
         if selectedHost == host.id { choose(session: states["local"]?.sessions.first?.id ?? "", host: "local") }
     }
