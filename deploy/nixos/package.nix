@@ -18,6 +18,7 @@ in (buildGo127Module.override { inherit go; }) {
   modRoot = "service";
   vendorHash = lib.removeSuffix "\n" (builtins.readFile ./vendor-hash.txt);
   subPackages = [ "cmd/illogical" ];
+  ldflags = [ "-X illogical/internal/mux.Version=0.1.0" ];
   nativeBuildInputs = [ pkg-config ];
   nativeCheckInputs = [ openssh ];
   buildInputs = [ libghostty-vt.dev ];

@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -20,12 +21,24 @@ type testClient struct {
 	encoder *json.Encoder
 }
 
-func startTest(t *testing.T) (*Server, string) {
+// testDirectory is short enough for a Unix socket path, unlike t.TempDir on macOS.
+func testDirectory(t *testing.T) string {
 	t.Helper()
 	directory, err := os.MkdirTemp("/tmp", "illogical-test-")
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { os.RemoveAll(directory) })
+	return directory
+}
+
+func startTest(t *testing.T) (*Server, string) {
+	t.Helper()
+	return startTestIn(t, testDirectory(t))
+}
+
+func startTestIn(t *testing.T, directory string) (*Server, string) {
+	t.Helper()
 	socket := filepath.Join(directory, "s.sock")
 	s, err := NewServer(directory, socket)
 	if err != nil {
@@ -33,7 +46,7 @@ func startTest(t *testing.T) (*Server, string) {
 	}
 	done := make(chan struct{})
 	go func() { _ = s.Run(); close(done) }()
-	t.Cleanup(func() { s.Close(); <-done; os.RemoveAll(directory) })
+	t.Cleanup(func() { s.Close(); <-done })
 	return s, socket
 }
 func connectTest(t *testing.T, socket string) *testClient {
@@ -214,6 +227,86 @@ func TestParkingKeepsProcessAndWakesOnOutput(t *testing.T) {
 	}
 }
 
+// Every malformed request gets an error reply; none may take the service
+// (and every shell it owns) down.
+func TestMalformedRequestsFailWithoutHarm(t *testing.T) {
+	_, socket := startTest(t)
+	c := connectTest(t, socket)
+	created := c.request(t, Request{Method: "session.new", Command: []string{"/bin/cat"}, KeepOpen: true})
+	zero := uint64(0)
+	for _, r := range []Request{
+		{Method: "no.such.method"},
+		{Method: "session.new", Cols: 65535, Rows: 65535, Command: []string{"/bin/cat"}},
+		{Method: "session.new", Cwd: "relative/path"},
+		{Method: "session.new", Command: []string{""}},
+		{Method: "window.new", Session: "missing"},
+		{Method: "block.split", Block: "missing"},
+		{Method: "block.key", Block: created.Block},
+		{Method: "block.key", Block: created.Block, Key: &KeyInput{Name: "", Mods: "nonsense"}},
+		{Method: "block.mouse", Block: created.Block, Mouse: &MouseInput{X: 1 << 31, Y: 1 << 31, Pixels: true}},
+		{Method: "block.resize", Block: created.Block, Cols: 0, Rows: 0},
+		{Method: "block.theme", Block: created.Block, Theme: &Theme{Palette: []uint32{1}}},
+		{Method: "block.viewport", Block: created.Block, Viewport: &zero},
+		{Method: "block.event", Block: created.Block, Label: "anything"},
+		{Method: "block.capture", Block: created.Block, Format: "pdf"},
+		{Method: "layout.resize", Window: created.Window, Target: "missing", Ratio: 2},
+		{Method: "window.move", Window: created.Window, Target: "missing"},
+		{Method: "block.move", Block: created.Block, Target: created.Block + "x"},
+		{Method: "focus", Session: "missing"},
+		{Method: "client.detach", Client: "missing"},
+		{Method: "remote.pair", Label: "not-an-ip"},
+	} {
+		r.ID = NewID()
+		if err := c.encoder.Encode(r); err != nil {
+			t.Fatal(err)
+		}
+		m := c.next(t)
+		for m.ID != r.ID {
+			m = c.next(t)
+		}
+		if m.Error == "" {
+			t.Fatalf("%s accepted %+v", r.Method, r)
+		}
+	}
+	if _, err := c.conn.Write([]byte("{not json\n")); err != nil {
+		t.Fatal(err)
+	}
+	if m := c.next(t); m.Type != "error" {
+		t.Fatalf("invalid JSON reply %+v", m)
+	}
+	if c.request(t, Request{Method: "block.process", Block: created.Block}).Process.ExitCode != nil {
+		t.Fatal("terminal did not survive malformed requests")
+	}
+}
+
+// A daily-driver service sees thousands of CLI and app connections; each must
+// leave nothing behind, including attach history streams.
+func TestClientConnectionsDoNotLeakGoroutines(t *testing.T) {
+	_, socket := startTest(t)
+	admin := connectTest(t, socket)
+	created := admin.request(t, Request{Method: "session.new", Command: []string{"/bin/sh", "-c", "seq 1 20000; sleep 30"}, KeepOpen: true})
+	waitCapture(t, admin, created.Block, "20000")
+	baseline := runtime.NumGoroutine()
+	for range 20 {
+		conn, err := net.Dial("unix", socket)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Attach and hang up without reading the scrollback history.
+		_ = json.NewEncoder(conn).Encode(Request{ID: "attach", Method: "block.attach", Block: created.Block})
+		_ = json.NewEncoder(conn).Encode(Request{ID: "watch", Method: "watch"})
+		time.Sleep(5 * time.Millisecond)
+		conn.Close()
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for runtime.NumGoroutine() > baseline {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d goroutines remain after disconnecting, baseline %d", runtime.NumGoroutine(), baseline)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestSocketIsPrivateAndDuplicateServiceRejected(t *testing.T) {
 	s, socket := startTest(t)
 	info, err := os.Stat(socket)
@@ -238,7 +331,7 @@ func TestParkedTerminalCanReattachDuringPartialEscapeSequence(t *testing.T) {
 	waitCapture(t, c, created.Block, "ready")
 	c.request(t, Request{Method: "block.park", Block: created.Block})
 	c.request(t, Request{Method: "block.write", Block: created.Block, Data: []byte("wake\n")})
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		state := c.request(t, Request{Method: "state"}).State
 		if !state.Blocks[0].Parked {

@@ -1,8 +1,6 @@
 package main
 
 import (
-	"bufio"
-	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -28,9 +26,7 @@ func dialTargetUsing(socket, host, executable string, remote func(string, string
 	if err != nil {
 		return nil, err
 	}
-	scanner := bufio.NewScanner(conn)
-	scanner.Buffer(make([]byte, 64<<10), 128<<20)
-	return &connection{Conn: conn, scanner: scanner, encoder: json.NewEncoder(conn)}, nil
+	return newConnection(conn), nil
 }
 
 type sshConnection struct {

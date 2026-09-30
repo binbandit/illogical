@@ -26,6 +26,64 @@ func TestCLIProcessHelper(t *testing.T) {
 	os.Exit(2)
 }
 
+// The app and a CLI may both find no service and start one at once. Exactly
+// one must win, and both must end up talking to it.
+func TestConcurrentServiceStartsYieldOneService(t *testing.T) {
+	directory, err := os.MkdirTemp("/tmp", "illogical-race-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(directory)
+	socket := filepath.Join(directory, "s.sock")
+	env := append(os.Environ(), "ILLOGICAL_TEST_CLI=1", "ILLOGICAL_HOME="+directory, "ILLOGICAL_SOCKET="+socket, "GORACE=atexit_sleep_ms=0")
+	var services []*exec.Cmd
+	exited := make(chan error, 4)
+	for range 4 {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestCLIProcessHelper$", "--", "serve")
+		cmd.Env = env
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		services = append(services, cmd)
+		go func() { exited <- cmd.Wait() }()
+	}
+	defer func() {
+		for _, cmd := range services {
+			_ = cmd.Process.Kill()
+		}
+	}()
+	for range 3 {
+		select {
+		case err := <-exited:
+			if err == nil {
+				t.Fatal("a losing service exited successfully")
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("losing services kept running")
+		}
+	}
+	c, err := dialRunning(socket)
+	for deadline := time.Now().Add(5 * time.Second); err != nil && time.Now().Before(deadline); {
+		time.Sleep(10 * time.Millisecond)
+		c, err = dialRunning(socket)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if _, err := c.request(mux.Request{Method: "server.stop"}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-exited:
+		if err != nil {
+			t.Fatalf("winning service: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("winning service did not stop")
+	}
+}
+
 func TestCLIResourceAndAutomationEndToEnd(t *testing.T) {
 	directory, err := os.MkdirTemp("/tmp", "illogical-cli-test-")
 	if err != nil {

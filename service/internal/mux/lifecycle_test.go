@@ -45,12 +45,148 @@ func TestMoveAndSwapRejectNonBlockTargetsAtomically(t *testing.T) {
 	c.request(t, Request{Method: "block.swap", Block: first.Block, Target: second.Block})
 	state = c.request(t, Request{Method: "state"}).State
 	root := state.Sessions[0].Windows[0].Root
-	if root.Axis != "vertical" || root.First.Block != first.Block || root.Second.Block != second.Block || len(state.Sessions[1].Windows) != 0 {
+	if root.Axis != "vertical" || root.First.Block != first.Block || root.Second.Block != second.Block || len(state.Sessions) != 1 {
 		t.Fatalf("valid move or same-window swap failed: %#v", root)
 	}
 	for _, info := range state.Blocks {
 		if info.Session != first.Session || info.Window != first.Window || info.ExitCode != nil {
 			t.Fatalf("block has incorrect placement or exited after movement: %#v", info)
+		}
+	}
+}
+
+func TestSessionClosesWithItsLastTab(t *testing.T) {
+	for _, how := range []string{"block.kill", "window.kill", "child-exit", "block.move"} {
+		t.Run(how, func(t *testing.T) {
+			_, socket := startTest(t)
+			c := connectTest(t, socket)
+			keep := c.request(t, Request{Method: "session.new", Label: "keep", Command: []string{"/bin/cat"}, KeepOpen: true})
+			command := []string{"/bin/cat"}
+			if how == "child-exit" {
+				command = []string{"/bin/sh", "-c", "stty -echo; printf ready; read line"}
+			}
+			doomed := c.request(t, Request{Method: "session.new", Label: "doomed", Command: command})
+			switch how {
+			case "child-exit":
+				waitCapture(t, c, doomed.Block, "ready")
+				c.request(t, Request{Method: "block.write", Block: doomed.Block, Data: []byte("bye\n")})
+			case "block.move":
+				c.request(t, Request{Method: "block.move", Block: doomed.Block, Target: keep.Block})
+			default:
+				c.request(t, Request{Method: how, Block: doomed.Block, Window: doomed.Window})
+			}
+			deadline := time.Now().Add(3 * time.Second)
+			for {
+				state := c.request(t, Request{Method: "state"}).State
+				if len(state.Sessions) == 1 && state.Sessions[0].ID == keep.Session {
+					return
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("session without tabs was kept: %+v", state.Sessions)
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+		})
+	}
+}
+
+// Saved state may predate a crash, a deleted directory, or a bug. Restoring it
+// must never leave panes without shells, shells without panes, or stale files.
+func TestRestoreRepairsStaleState(t *testing.T) {
+	home := testDirectory(t)
+	t.Setenv("HOME", home)
+	t.Setenv("SHELL", "/bin/sh")
+	directory := testDirectory(t)
+	saved := `{"sessions":[null,{"id":"tabless","name":"tabless","windows":[]},
+		{"id":"s","name":"work","focusedWindow":"gone","windows":[null,
+			{"id":"w","name":"","focusedBlock":"ghost","root":{"id":"split","axis":"horizontal","ratio":0.5,
+				"first":{"id":"l1","block":"live"},"second":{"id":"l2","block":"ghost"}}},
+			{"id":"empty","name":"","root":{"id":"hollow"}}]}],
+		"blocks":[
+			{"id":"live","title":"sh","cwd":"/deleted/directory","pid":1,"cols":9999,"rows":24,"parked":false,"command":["/bin/sh"],"keepOpen":false},
+			{"id":"orphan","title":"sh","cwd":"/","pid":2,"cols":80,"rows":24,"parked":false,"command":["/bin/sh"],"keepOpen":true}]}`
+	if err := os.WriteFile(filepath.Join(directory, "workspace.json"), []byte(saved), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, stale := range []string{"snapshots/live.gz", ".write-123"} {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(directory, stale)), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(directory, stale), nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, socket := startTestIn(t, directory)
+	c := connectTest(t, socket)
+	state := c.request(t, Request{Method: "state"}).State
+	if len(state.Sessions) != 1 || len(state.Sessions[0].Windows) != 1 || len(state.Blocks) != 1 {
+		t.Fatalf("stale layout survived restore: %+v", state)
+	}
+	window, block := state.Sessions[0].Windows[0], state.Blocks[0]
+	if state.Sessions[0].FocusedWindow != "w" || window.FocusedBlock != "live" || window.Root.Block != "live" || block.ID != "live" || block.Cwd != home || block.Cols != 100 {
+		t.Fatalf("restored pane not repaired: %+v %+v", window, block)
+	}
+	for _, stale := range []string{"snapshots", ".write-123"} {
+		if _, err := os.Stat(filepath.Join(directory, stale)); !os.IsNotExist(err) {
+			t.Fatalf("%s from the previous service survived restore: %v", stale, err)
+		}
+	}
+	// The pane was not keep-open, so exiting its restored shell closes it.
+	c.request(t, Request{Method: "block.write", Block: "live", Data: []byte("exit\n")})
+	deadline := time.Now().Add(3 * time.Second)
+	for len(c.request(t, Request{Method: "state"}).State.Sessions) != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("restored shell exit left its pane open")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestRestoreSetsAsideCorruptWorkspace(t *testing.T) {
+	directory := testDirectory(t)
+	if err := os.WriteFile(filepath.Join(directory, "workspace.json"), []byte(`{"sessions":[`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, socket := startTestIn(t, directory)
+	if state := connectTest(t, socket).request(t, Request{Method: "state"}).State; len(state.Sessions) != 0 {
+		t.Fatalf("corrupt workspace produced sessions: %+v", state)
+	}
+	if data, err := os.ReadFile(filepath.Join(directory, "workspace.json.corrupt")); err != nil || string(data) != `{"sessions":[` {
+		t.Fatalf("corrupt workspace was not preserved for inspection: %v", err)
+	}
+}
+
+func TestNewTabOpensRightOfCurrentAndTabsReorder(t *testing.T) {
+	_, socket := startTest(t)
+	c := connectTest(t, socket)
+	cat := []string{"/bin/cat"}
+	a := c.request(t, Request{Method: "session.new", Command: cat, KeepOpen: true})
+	b := c.request(t, Request{Method: "window.new", Block: a.Block, Command: cat, KeepOpen: true})
+	d := c.request(t, Request{Method: "window.new", Block: a.Block, Command: cat, KeepOpen: true})
+	e := c.request(t, Request{Method: "window.new", Session: a.Session, Command: cat, KeepOpen: true})
+	order := func() []string {
+		var ids []string
+		for _, w := range c.request(t, Request{Method: "state"}).State.Sessions[0].Windows {
+			ids = append(ids, w.ID)
+		}
+		return ids
+	}
+	if got, want := order(), []string{a.Window, d.Window, e.Window, b.Window}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("tab order %v, want %v", got, want)
+	}
+	c.request(t, Request{Method: "window.move", Window: e.Window, Target: a.Window})
+	c.request(t, Request{Method: "window.move", Window: d.Window, Target: b.Window})
+	if got, want := order(), []string{e.Window, a.Window, b.Window, d.Window}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("tab order after moves %v, want %v", got, want)
+	}
+	other := c.request(t, Request{Method: "session.new", Command: cat, KeepOpen: true})
+	r := Request{ID: NewID(), Method: "window.move", Window: a.Window, Target: other.Window}
+	if err := c.encoder.Encode(r); err != nil {
+		t.Fatal(err)
+	}
+	for m := c.next(t); m.ID != r.ID || m.Error == ""; m = c.next(t) {
+		if m.ID == r.ID {
+			t.Fatal("moved a tab into another session's order")
 		}
 	}
 }
@@ -74,8 +210,8 @@ func TestSessionExactIDPrecedesNames(t *testing.T) {
 	}
 }
 
-func TestPermanentRemovalDeletesSnapshotButShutdownRetainsIt(t *testing.T) {
-	for _, method := range []string{"block.kill", "window.kill", "session.kill", "child-exit", "shutdown"} {
+func TestPermanentRemovalDeletesSnapshot(t *testing.T) {
+	for _, method := range []string{"block.kill", "window.kill", "session.kill", "child-exit"} {
 		t.Run(method, func(t *testing.T) {
 			s, socket := startTest(t)
 			c := connectTest(t, socket)
@@ -85,13 +221,6 @@ func TestPermanentRemovalDeletesSnapshotButShutdownRetainsIt(t *testing.T) {
 			path := filepath.Join(s.directory, "snapshots", created.Block+".gz")
 			if _, err := os.Stat(path); err != nil {
 				t.Fatal(err)
-			}
-			if method == "shutdown" {
-				s.Close()
-				if _, err := os.Stat(path); err != nil {
-					t.Fatalf("shutdown removed a retained snapshot: %v", err)
-				}
-				return
 			}
 			if method == "child-exit" {
 				c.request(t, Request{Method: "block.write", Block: created.Block, Data: []byte("finish\n")})

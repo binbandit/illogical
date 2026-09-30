@@ -43,14 +43,14 @@ final class TerminalResourcePool<Key: Hashable, Resource: AnyObject> {
     private var references: [Key: Reference] = [:]
     private var recent: Resource?
 
-    func resource(for key: Key, usable: (Resource) -> Bool, create: () -> Resource) -> Resource {
+    func resource(for key: Key, usable: (Resource) -> Bool, create: () -> Resource?) -> Resource? {
         if let existing = references[key]?.value, usable(existing) {
             recent = existing
             return existing
         }
         // Prune only on a cache miss, not on the frame rendering path.
         references = references.filter { $0.value.value != nil }
-        let resource = create()
+        guard let resource = create() else { return nil }
         references[key] = Reference(resource)
         recent = resource
         return resource
@@ -82,7 +82,8 @@ struct TerminalTextBlinkState {
     var timerRequired: Bool { hasBlinkingText && canPresent }
 
     mutating func update(hasBlinkingText: Bool, canPresent: Bool) {
-        self.hasBlinkingText = hasBlinkingText; self.canPresent = canPresent
+        self.hasBlinkingText = hasBlinkingText
+        self.canPresent = canPresent
         if !timerRequired { phaseVisible = true }
     }
     mutating func advance() -> Bool {
@@ -90,7 +91,7 @@ struct TerminalTextBlinkState {
         phaseVisible.toggle()
         return true
     }
-    func drawsText(attributes: UInt8) -> Bool {
-        attributes & 2 == 0 && (attributes & 4 == 0 || phaseVisible)
+    func drawsText(invisible: Bool, blinking: Bool) -> Bool {
+        !invisible && (!blinking || phaseVisible)
     }
 }
