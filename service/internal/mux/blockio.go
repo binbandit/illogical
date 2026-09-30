@@ -91,6 +91,7 @@ func (b *Block) readLoop() {
 			}
 			b.lastOutput = time.Now()
 			b.writeOutput(data)
+			b.scheduleDirectoryCheck()
 			b.mu.Unlock()
 		}
 		if err != nil {

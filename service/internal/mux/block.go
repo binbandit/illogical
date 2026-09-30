@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -44,6 +45,8 @@ type Block struct {
 	desiredSizes map[string]DesiredSize
 	cellWidth    uint32
 	cellHeight   uint32
+
+	directoryCheck *time.Timer
 
 	// Input and replies to terminal queries, written by writeLoop.
 	input         chan []byte
@@ -219,6 +222,9 @@ func (b *Block) close() {
 		b.terminal.Close()
 		b.terminal = nil
 	}
+	if b.directoryCheck != nil {
+		b.directoryCheck.Stop()
+	}
 	b.mu.Unlock()
 	b.io.Wait()
 	if running {
@@ -273,10 +279,9 @@ func (b *Block) installEffects() {
 		b.event(Message{Event: "title_changed", Text: b.info.Title})
 	})
 	t.SetEffectPwdChanged(func(t *vt.Terminal) {
-		if cwd, err := t.Pwd(); err == nil && cwd != "" {
-			b.info.Cwd = normalizeDirectory(cwd)
-			b.event(Message{Event: "pwd_changed", Text: b.info.Cwd})
-			b.server.changed()
+		// A report naming another host comes from ssh; it is not a local path.
+		if cwd, err := t.Pwd(); err == nil && isLocalDirectory(cwd) {
+			b.setDirectory(normalizeDirectory(cwd))
 		}
 	})
 	t.SetEffectProgressReport(func(_ *vt.Terminal, report vt.TerminalProgressReport) {
@@ -302,6 +307,64 @@ func normalizeDirectory(value string) string {
 		return parsed.Path
 	}
 	return value
+}
+
+// isLocalDirectory reports whether an OSC 7 value names a path on this host.
+func isLocalDirectory(value string) bool {
+	if value == "" {
+		return false
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme != "file" || parsed.Host == "" || strings.EqualFold(parsed.Host, "localhost") {
+		return true
+	}
+	hostname, _ := os.Hostname()
+	short := func(name string) string {
+		name, _, _ = strings.Cut(name, ".")
+		return strings.ToLower(name)
+	}
+	return short(parsed.Host) == short(hostname)
+}
+
+// setDirectory records the shell's working directory. Caller holds b.mu.
+func (b *Block) setDirectory(path string) {
+	if path == b.info.Cwd {
+		return
+	}
+	b.info.Cwd = path
+	b.event(Message{Event: "pwd_changed", Text: path})
+	b.server.changed()
+}
+
+// scheduleDirectoryCheck arranges for the shell's working directory to be
+// read from the process shortly after output. Shells without OSC 7
+// integration never report a cd, and output (a new prompt) follows every
+// command, so this tracks them without polling an idle terminal.
+// Caller holds b.mu.
+func (b *Block) scheduleDirectoryCheck() {
+	if b.directoryCheck == nil {
+		b.directoryCheck = time.AfterFunc(directoryCheckDelay, b.checkDirectory)
+	}
+}
+
+const directoryCheckDelay = 250 * time.Millisecond
+
+func (b *Block) checkDirectory() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.directoryCheck = nil
+	if b.closed {
+		return
+	}
+	path := processDirectory(b.info.PID)
+	if path == "" || path == b.info.Cwd {
+		return
+	}
+	// A reported symlinked path (/tmp) is kept over its resolved form.
+	if resolved, err := filepath.EvalSymlinks(b.info.Cwd); err == nil && resolved == path {
+		return
+	}
+	b.setDirectory(path)
 }
 
 func (b *Block) applyTheme() {
