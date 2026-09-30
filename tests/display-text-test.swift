@@ -104,7 +104,7 @@ extension MetalTerminalRenderer {
         ]
         let text = "\(e)?25h" + lines.joined(separator: "\r\n")
         for scale: CGFloat in [1, 2] {
-            let bounds = CGRect(x: 0, y: 0, width: 640, height: 300)
+            let bounds = CGRect(x: 0, y: 0, width: 640, height: 340)
             let window = DisplayTextWindow(contentRect: bounds, styleMask: [], backing: .buffered, defer: false)
             window.isReleasedWhenClosed = false;window.testScale = scale
             let view = MTKView(frame: bounds, device: device!)
@@ -114,8 +114,10 @@ extension MetalTerminalRenderer {
             Data(text.utf8).withUnsafeBytes { il_terminal_feed(engine.handle, $0.bindMemory(to: UInt8.self).baseAddress, $0.count) }
             let renderer = MetalTerminalRenderer(engine: engine, view: view)!
             renderer.fontName = fontName;renderer.fontSize = 14;renderer.focused = true
+            // The owner's Ghostty configuration.
             renderer.fontOptions = .importGhostty(entries: [("font-thicken", "true"), ("font-thicken-strength", "100"),
-                ("font-variation", "wght=420"), ("font-feature", "+calt"), ("font-feature", "+zero")])
+                ("font-variation", "wght=420"), ("font-feature", "+calt"), ("font-feature", "+zero"), ("adjust-cell-height", "10%"),
+                ("cursor-style", "bar"), ("cursor-style-blink", "false"), ("adjust-cursor-thickness", "2"), ("window-colorspace", "display-p3")])
             let width = Int(bounds.width * scale), height = Int(bounds.height * scale)
             let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: width, height: height, mipmapped: false)
             descriptor.usage = [.renderTarget, .shaderRead];descriptor.storageMode = .shared

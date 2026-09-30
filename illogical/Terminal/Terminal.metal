@@ -1,49 +1,119 @@
 #include <metal_stdlib>
 using namespace metal;
-struct Quad { float4 rect; float4 uv; float4 color; uint textured; };
-struct Raster { float4 position [[position]]; float2 uv; float4 color; uint textured [[flat]]; };
-vertex Raster terminal_vertex(uint v [[vertex_id]], uint i [[instance_id]], const device Quad *quads [[buffer(0)]], constant float2 &viewport [[buffer(1)]]) {
-    const float2 corners[6] = {float2(0,0),float2(1,0),float2(0,1),float2(1,0),float2(1,1),float2(0,1)};
-    Quad q = quads[i]; float2 p = corners[v]; float2 position = q.rect.xy + p * q.rect.zw;
-    Raster out; out.position = float4(position.x / viewport.x * 2 - 1, 1 - position.y / viewport.y * 2, 0, 1);
-    out.uv = q.uv.xy + p * q.uv.zw; out.color = q.color; out.textured = q.textured; return out;
+
+// Must match TerminalQuad.Kind in MetalRenderer.swift.
+enum QuadKind : uint {
+    solid = 0,
+    glyph = 1,      // Grayscale atlas coverage, tinted by the quad color.
+    colorGlyph = 2, // Premultiplied RGBA atlas texels (emoji).
+    image = 3,      // Straight-alpha Kitty image, normalized coordinates.
+    curlyLine = 4,  // Procedural decorations in device-pixel pattern space.
+    dottedLine = 5,
+    dashedLine = 6,
+};
+
+// Must match TerminalQuad in MetalRenderer.swift (64-byte stride).
+struct Quad {
+    float4 rect;      // Origin and size in points.
+    float4 uv;        // Texture or pattern origin and extent.
+    float4 color;     // Premultiplied.
+    uint kind;
+    float thickness;  // Decoration stroke thickness in device pixels.
+    uint2 padding;
+};
+
+// Must match TerminalUniforms in MetalRenderer.swift.
+struct Uniforms {
+    float2 viewport;  // Drawable size in points.
+    float cellWidth;  // Decoration pattern period in device pixels.
+    uint smoothGlyphs; // Scaled previews filter the atlas linearly.
+};
+
+struct Raster {
+    float4 position [[position]];
+    float2 uv;
+    float4 color;
+    uint kind [[flat]];
+    float thickness [[flat]];
+};
+
+vertex Raster terminal_vertex(uint vertexID [[vertex_id]], uint instance [[instance_id]],
+                              const device Quad *quads [[buffer(0)]], constant Uniforms &uniforms [[buffer(1)]]) {
+    const float2 corners[6] = { float2(0, 0), float2(1, 0), float2(0, 1), float2(1, 0), float2(1, 1), float2(0, 1) };
+    Quad quad = quads[instance];
+    float2 corner = corners[vertexID];
+    float2 position = quad.rect.xy + corner * quad.rect.zw;
+    Raster out;
+    out.position = float4(position.x / uniforms.viewport.x * 2 - 1, 1 - position.y / uniforms.viewport.y * 2, 0, 1);
+    out.uv = quad.uv.xy + corner * quad.uv.zw;
+    out.color = quad.color;
+    out.kind = quad.kind;
+    out.thickness = quad.thickness;
+    return out;
 }
-fragment float4 terminal_fragment(Raster in [[stage_in]], texture2d<float> atlas [[texture(0)]]) {
-    constexpr sampler sample(coord::normalized, address::clamp_to_edge, filter::linear);
-    constexpr sampler glyphSample(coord::normalized, address::clamp_to_edge, filter::nearest);
-    if (in.textured == 0) return in.color;
-    if (in.textured == 8) {
-        // Kitty pixel payloads contain straight alpha. The window uses
-        // premultiplied alpha, as do the text and solid-color pipelines.
-        float4 pixel = atlas.sample(sample, in.uv);
+
+// Coverage of a stroke at signed distance `distance` (pixels) from its edge,
+// antialiased over one screen pixel of pattern space.
+static float edgeCoverage(float distance, float2 uv) {
+    float pixel = max(length(fwidth(uv)) * 0.7071, 1e-3);
+    return saturate(0.5 - distance / pixel);
+}
+
+// One wave per cell, peaking at the cell center, like Ghostty's undercurl.
+// The quad spans the wave's amplitude plus one stroke thickness.
+static float curlyCoverage(float2 p, float thickness, float cellWidth) {
+    float amplitude = cellWidth / M_PI_F;
+    float phase = 2 * M_PI_F * p.x / cellWidth;
+    float center = thickness / 2 + amplitude * (1 + cos(phase)) / 2;
+    float slope = -amplitude * M_PI_F / cellWidth * sin(phase);
+    float distance = abs(p.y - center) / sqrt(1 + slope * slope);
+    return edgeCoverage(distance - thickness / 2, p);
+}
+
+// Evenly spaced round dots, sized and counted per cell like Ghostty's.
+static float dottedCoverage(float2 p, float thickness, float cellWidth) {
+    float radius = M_SQRT1_2_F * thickness;
+    float count = max(1.0, min(min(ceil(cellWidth / (4 * radius)), floor(cellWidth / (3 * radius))),
+                               floor(cellWidth / (2 * radius + 1))));
+    float spacing = cellWidth / count;
+    float x = fmod(p.x, cellWidth);
+    float2 center = float2((floor(x / spacing) + 0.5) * spacing, ceil(radius));
+    return edgeCoverage(length(float2(x, p.y) - center) - radius, p);
+}
+
+// Ghostty's per-cell dash pattern: dashes one third of a cell wide, plus one.
+static float dashedCoverage(float2 p, float cellWidth) {
+    float dash = floor(cellWidth / 3) + 1;
+    return fmod(floor(fmod(p.x, cellWidth) / dash), 2.0) == 0 ? 1 : 0;
+}
+
+fragment float4 terminal_fragment(Raster in [[stage_in]], constant Uniforms &uniforms [[buffer(1)]],
+                                  texture2d<float> glyphs [[texture(0)]], texture2d<float> colorGlyphs [[texture(1)]],
+                                  texture2d<float> imageTexture [[texture(2)]]) {
+    // Full-size glyphs sample exact texels, like Ghostty. Scaled previews
+    // and images interpolate.
+    constexpr sampler exact(coord::pixel, address::clamp_to_edge, filter::nearest);
+    constexpr sampler smooth(coord::pixel, address::clamp_to_edge, filter::linear);
+    constexpr sampler normalized(coord::normalized, address::clamp_to_edge, filter::linear);
+    switch (in.kind) {
+    case solid:
+        return in.color;
+    case glyph:
+        return in.color * (uniforms.smoothGlyphs ? glyphs.sample(smooth, in.uv) : glyphs.sample(exact, in.uv)).r;
+    case colorGlyph:
+        return (uniforms.smoothGlyphs ? colorGlyphs.sample(smooth, in.uv) : colorGlyphs.sample(exact, in.uv)) * in.color.a;
+    case image: {
+        // Kitty pixel payloads contain straight alpha; the window is premultiplied.
+        float4 pixel = imageTexture.sample(normalized, in.uv);
         return float4(pixel.rgb * pixel.a, pixel.a);
     }
-    // Overview previews scale the atlas. Ordinary terminal glyphs already
-    // contain CoreText coverage and, like Ghostty, sample exact atlas texels.
-    if (in.textured == 9) return atlas.sample(sample, in.uv) * in.color;
-    if (in.textured >= 5) {
-        float coverage;
-        if (in.textured == 5) {
-            float center = 1.5 + sin(in.uv.x * 1.04719755);
-            float distance = abs(in.uv.y - center);
-            float aa = max(fwidth(in.uv.y) * 0.5, 0.05);
-            coverage = 1.0 - smoothstep(0.5 - aa, 0.5 + aa, distance);
-        } else if (in.textured == 6) {
-            float distance = length(float2(fmod(in.uv.x, 3.0) - 1.5, in.uv.y - 0.75));
-            float aa = max(fwidth(in.uv.x) * 0.5, 0.05);
-            coverage = 1.0 - smoothstep(0.65 - aa, 0.65 + aa, distance);
-        } else {
-            float distance = abs(fmod(in.uv.x, 6.0) - 3.0);
-            float aa = max(fwidth(in.uv.x) * 0.5, 0.05);
-            coverage = 1.0 - smoothstep(2.0 - aa, 2.0 + aa, distance);
-        }
-        return in.color * coverage;
+    case curlyLine:
+        return in.color * curlyCoverage(in.uv, in.thickness, uniforms.cellWidth);
+    case dottedLine:
+        return in.color * dottedCoverage(in.uv, in.thickness, uniforms.cellWidth);
+    case dashedLine:
+        return in.color * dashedCoverage(in.uv, uniforms.cellWidth);
+    default:
+        return float4(0);
     }
-    if (in.textured >= 2) {
-        // A repeating 2x2 dither preserves light, medium, and dark shade characters.
-        uint2 pixel = uint2(in.position.xy);
-        uint threshold = ((pixel.x & 1) << 1) | ((pixel.x ^ pixel.y) & 1);
-        return threshold < in.textured - 1 ? in.color : float4(0);
-    }
-    return atlas.sample(glyphSample, in.uv) * in.color;
 }

@@ -1,17 +1,13 @@
 // The runner concatenates this harness with MetalRenderer.swift so it exercises
 // the actual private atlas and quad types without exposing production test APIs.
 // No window, terminal daemon, PTY, or display link is created.
-extension GlyphAtlas {
-    func legacyCapacityMiss(_ key: Key) -> Entry? {
-        if let cached = entries[key] { return cached }
-        guard let bitmap = rasterizer.rasterize(key) else { return nil }
-        if x + bitmap.width >= dimension { x = 0; y += lineHeight + 1; lineHeight = 0 }
-        guard y + bitmap.height < dimension else { full = true; return nil }
-        preconditionFailure("The benchmark must begin with an exhausted atlas")
-    }
-}
-
 extension MetalTerminalRenderer {
+    static func bindUniforms(_ encoder: MTLRenderCommandEncoder, width: Float, height: Float) {
+        var uniforms = TerminalUniforms(viewport: SIMD2(width, height), cellWidth: 8, smoothGlyphs: 0)
+        encoder.setVertexBytes(&uniforms, length: MemoryLayout<TerminalUniforms>.stride, index: 1)
+        encoder.setFragmentBytes(&uniforms, length: MemoryLayout<TerminalUniforms>.stride, index: 1)
+    }
+
     @MainActor
     static func verifyFullRenderThemeTransitions() {
         let device = device!
@@ -121,11 +117,11 @@ extension MetalTerminalRenderer {
         pass.colorAttachments[0].loadAction = .clear;pass.colorAttachments[0].storeAction = .store
         pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
         let command = device.makeCommandQueue()!.makeCommandBuffer()!, encoder = command.makeRenderCommandEncoder(descriptor: pass)!
-        var quad = TerminalQuad(rect: SIMD4(0, 0, 2, 2), uv: SIMD4(0, 0, 1, 1), color: SIMD4(repeating: 1), textured: 8)
+        var quad = TerminalQuad(rect: SIMD4(0, 0, 2, 2), uv: SIMD4(0, 0, 1, 1), color: SIMD4(repeating: 1), kind: .image)
         encoder.setVertexBytes(&quad, length: MemoryLayout<TerminalQuad>.stride, index: 0)
-        var viewport = SIMD2<Float>(2, 2);encoder.setVertexBytes(&viewport, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
+        bindUniforms(encoder, width: 2, height: 2)
         encoder.setRenderPipelineState(makePipeline(device: device, blending: true)!)
-        encoder.setFragmentTexture(rgba, index: 0)
+        for index in 0..<3 { encoder.setFragmentTexture(rgba, index: index) }
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6, instanceCount: 1)
         encoder.endEncoding();command.commit();command.waitUntilCompleted()
         precondition(command.status == .completed && pixel(output) == [0, 128, 0, 128], "Image shader must convert straight RGBA to premultiplied window pixels")
@@ -143,16 +139,15 @@ extension MetalTerminalRenderer {
         pass.colorAttachments[0].loadAction = .clear; pass.colorAttachments[0].storeAction = .store
         pass.colorAttachments[0].clearColor = MTLClearColor(red: 0.5, green: 0, blue: 0, alpha: 0.5)
         let quads = [
-            TerminalQuad(rect: SIMD4(4, 0, 4, 4), uv: .zero, color: rgba(0x00ff00, alpha: 0.5), textured: 0),
-            TerminalQuad(rect: SIMD4(8, 0, 4, 4), uv: .zero, color: rgba(0x00ff00), textured: 0),
-            TerminalQuad(rect: SIMD4(12, 0, 4, 4), uv: .zero, color: rgba(0x0000ff), textured: 0)
+            TerminalQuad(CGRect(x: 4, y: 0, width: 4, height: 4), color: premultiplied(0x00ff00, alpha: 0.5)),
+            TerminalQuad(CGRect(x: 8, y: 0, width: 4, height: 4), color: premultiplied(0x00ff00)),
+            TerminalQuad(CGRect(x: 12, y: 0, width: 4, height: 4), color: premultiplied(0x0000ff))
         ]
         let buffer = quads.withUnsafeBytes { device.makeBuffer(bytes: $0.baseAddress!, length: $0.count)! }
         let command = device.makeCommandQueue()!.makeCommandBuffer()!
         let encoder = command.makeRenderCommandEncoder(descriptor: pass)!
         encoder.setVertexBuffer(buffer, offset: 0, index: 0)
-        var viewport = SIMD2<Float>(16, 4)
-        encoder.setVertexBytes(&viewport, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
+        bindUniforms(encoder, width: 16, height: 4)
         encoder.setRenderPipelineState(makePipeline(device: device, blending: false)!)
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6, instanceCount: 2)
         encoder.setRenderPipelineState(makePipeline(device: device, blending: true)!)
@@ -249,21 +244,15 @@ struct ResourceRenderBenchmark {
     static func main() {
         guard let device = MTLCreateSystemDefaultDevice() else { fatalError("Metal device unavailable") }
         MetalTerminalRenderer.verifyFullRenderThemeTransitions()
-        if ProcessInfo.processInfo.environment["ILLOGICAL_FRAME_BENCHMARK"] == "1" { MetalTerminalRenderer.measureFullFrameEncoding(); return }
         if ProcessInfo.processInfo.environment["ILLOGICAL_RENDER_SANITIZE"] == "1" { return }
         let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
-        let cell = NSSize(width: 8, height: 19)
         func create(_ size: CGFloat) -> GlyphAtlas {
-            GlyphAtlas(device: device, font: NSFont(descriptor: font.fontDescriptor, size: size)!, scale: 2, cell: cell, options: .defaults)
+            GlyphAtlas(device: device, font: NSFont(descriptor: font.fontDescriptor, size: size)!, scale: 2, options: .defaults)!
         }
         let baselineBytes = autoreleasepool {
             let start = device.currentAllocatedSize
-            var oldCache: [Int: GlyphAtlas] = [:]
-            for size in 13..<22 {
-                if oldCache.count > 8 { oldCache.removeAll() }
-                oldCache[size] = create(CGFloat(size))
-            }
-            return withExtendedLifetime(oldCache) { device.currentAllocatedSize - start }
+            let retained = (13..<22).map { create(CGFloat($0)) }
+            return withExtendedLifetime(retained) { device.currentAllocatedSize - start }
         }
         let pooledBytes = autoreleasepool {
             let start = device.currentAllocatedSize
@@ -274,71 +263,22 @@ struct ResourceRenderBenchmark {
             return withExtendedLifetime(pool) { device.currentAllocatedSize - start }
         }
         precondition(pooledBytes * 8 < baselineBytes, "Obsolete atlas textures must be released")
-        print("Nine sequential font sizes, actual Metal allocation: before=\(baselineBytes) after=\(pooledBytes) bytes")
+        print("Nine sequential font sizes, actual Metal allocation: retained=\(baselineBytes) pooled=\(pooledBytes) bytes")
 
+        // Fill the actual atlas with distinct wide runs. Once full, misses must
+        // return immediately instead of rasterizing every frame.
         let atlas = create(13)
-        // Fill the actual atlas with distinct keys, then benchmark an uncached
-        // glyph at capacity. Previously every repeated miss was rasterized.
-        for number in 0..<5_000 {
-            _ = atlas.glyph(.init(text: "==\(number)", bold: false, italic: false, width: 24))
-            if atlas.full { break }
+        var fills = 0
+        while !atlas.full && fills < 20_000 {
+            _ = atlas.glyph(.init(text: "==\(fills)", width: 24))
+            fills += 1
         }
-        precondition(atlas.full)
-        let miss = GlyphAtlas.Key(text: "capacity-miss", bold: false, italic: false, width: 24)
-        let missCount = 500
-        let oldMiss = elapsed { for _ in 0..<missCount { precondition(atlas.legacyCapacityMiss(miss) == nil) } }
-        let newMiss = elapsed { for _ in 0..<missCount { precondition(atlas.glyph(miss) == nil) } }
-        print(String(format: "500 full-atlas misses: before=%.3f after=%.3f ms", oldMiss * 1_000, newMiss * 1_000))
+        precondition(atlas.full && atlas.color == nil, "Monochrome text must not allocate the color atlas")
+        let miss = GlyphAtlas.Key(text: "capacity-miss", width: 24)
+        let missTime = elapsed { for _ in 0..<500 { precondition(atlas.glyph(miss) == nil) } }
+        print(String(format: "Atlas full after %d wide runs; 500 misses at capacity: %.3f ms", fills, missTime * 1_000))
 
-        // Isolate CPU quad staging, including the production memcpy into a
-        // shared Metal vertex buffer. This is not a whole-application FPS test.
-        let cells = 134 * 35
-        let count = cells * 2
-        let buffer = device.makeBuffer(length: count * MemoryLayout<TerminalQuad>.stride, options: .storageModeShared)!
-        let iterations = 2_000
-        var checksum: Float = 0
-        func element(_ index: Int, _ frame: Int) -> TerminalQuad {
-            TerminalQuad(rect: SIMD4(Float(index), Float(frame), 8, 19), uv: .zero, color: SIMD4(1, 0, 0, 1), textured: 0)
-        }
-        func old() -> Double {
-            elapsed {
-                for frame in 0..<iterations {
-                    var backgrounds: [TerminalQuad] = [], foregrounds: [TerminalQuad] = []
-                    backgrounds.reserveCapacity(cells); foregrounds.reserveCapacity(cells)
-                    for index in 0..<cells { backgrounds.append(element(index, frame)); foregrounds.append(element(index + cells, frame)) }
-                    let quads = backgrounds + foregrounds
-                    _ = quads.withUnsafeBytes { memcpy(buffer.contents(), $0.baseAddress!, $0.count) }
-                    checksum += buffer.contents().assumingMemoryBound(to: TerminalQuad.self)[count - 1].rect.y
-                }
-            }
-        }
-        func new() -> Double {
-            var backgrounds: [TerminalQuad] = [], foregrounds: [TerminalQuad] = []
-            return elapsed {
-                for frame in 0..<iterations {
-                    backgrounds.removeAll(keepingCapacity: true); foregrounds.removeAll(keepingCapacity: true)
-                    backgrounds.reserveCapacity(cells); foregrounds.reserveCapacity(cells)
-                    for index in 0..<cells { backgrounds.append(element(index, frame)); foregrounds.append(element(index + cells, frame)) }
-                    _ = backgrounds.withUnsafeBytes { memcpy(buffer.contents(), $0.baseAddress!, $0.count) }
-                    _ = foregrounds.withUnsafeBytes { memcpy(buffer.contents().advanced(by: backgrounds.count * MemoryLayout<TerminalQuad>.stride), $0.baseAddress!, $0.count) }
-                    checksum += buffer.contents().assumingMemoryBound(to: TerminalQuad.self)[count - 1].rect.y
-                }
-            }
-        }
-        var before: [Double] = [], after: [Double] = []
-        for sample in 0..<5 {
-            if sample.isMultiple(of: 2) { before.append(old()); after.append(new()) }
-            else { after.append(new()); before.append(old()) }
-            let quads = buffer.contents().assumingMemoryBound(to: TerminalQuad.self)
-            for index in 0..<count {
-                precondition(quads[index].rect == SIMD4(Float(index), Float(iterations - 1), 8, 19))
-                precondition(quads[index].uv == .zero && quads[index].color == SIMD4(1, 0, 0, 1) && quads[index].textured == 0)
-            }
-        }
-        precondition(checksum > 0)
-        before.sort(); after.sort()
-        print(String(format: "2,000 quad-staging frames, median of five: before=%.3f after=%.3f ms; checksum=%.0f", before[2] * 1_000, after[2] * 1_000, checksum))
-        print("CPU staging allocations after warmup: 3 arrays/frame -> 0; quad bytes copied: \(count * MemoryLayout<TerminalQuad>.stride * 2) -> \(count * MemoryLayout<TerminalQuad>.stride)/frame")
+        MetalTerminalRenderer.measureFullFrameEncoding()
         MetalTerminalRenderer.verifyTextBlinkTimers()
         try! MetalTerminalRenderer.verifyTranslucentBackgrounds()
         try! MetalTerminalRenderer.verifyStaticImages()
