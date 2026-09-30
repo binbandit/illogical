@@ -176,8 +176,6 @@ struct TerminalSurface: NSViewRepresentable {
 /// selection, scrolling, clipboard, links and focus, over a Metal renderer.
 @MainActor
 final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
-    /// Distance from the view edge to the first cell; matches the renderer.
-    static let contentInset: CGFloat = 8
     private static let scrollbarWidth: CGFloat = 11
     private static let cursorBlinkInterval: TimeInterval = 0.6
     private static let selectionAutoscrollInterval: TimeInterval = 0.015
@@ -244,6 +242,8 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
 
     private var reportedCellSize: CGSize?
     private var frameInfo = ILFrame()
+    /// Distance from the view edge to the first cell, wherever the renderer puts it.
+    private var gridInset: CGFloat { MetalTerminalRenderer.padding }
     private var paneFocused = true
     private var unfocusedOpacity: CGFloat = 1
     private var dimmerColor: (background: UInt32, opacity: CGFloat)?
@@ -513,7 +513,7 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
             reportedCellSize = cell
             DispatchQueue.main.async { [weak self] in self?.onCellSize(cell) }
         }
-        if interactive, let cell = renderer?.cell, let grid = Self.gridSize(for: metal.bounds.size, cell: cell) {
+        if interactive, let cell = renderer?.cell, let grid = Self.gridSize(for: metal.bounds.size, inset: gridInset, cell: cell) {
             let scale = window?.backingScaleFactor ?? 2
             engine.requestResize(columns: grid.columns, rows: grid.rows,
                                  cellWidth: UInt32((cell.width * scale).rounded()), cellHeight: UInt32((cell.height * scale).rounded()))
@@ -524,10 +524,10 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
     }
 
     /// The grid that fits inside the content insets, clamped to what the service accepts.
-    private static func gridSize(for size: CGSize, cell: CGSize) -> (columns: UInt16, rows: UInt16)? {
+    private static func gridSize(for size: CGSize, inset: CGFloat, cell: CGSize) -> (columns: UInt16, rows: UInt16)? {
         guard cell.width > 0, cell.height > 0 else { return nil }
-        let columns = ((size.width - 2 * contentInset) / cell.width).rounded(.down)
-        let rows = ((size.height - 2 * contentInset) / cell.height).rounded(.down)
+        let columns = ((size.width - 2 * inset) / cell.width).rounded(.down)
+        let rows = ((size.height - 2 * inset) / cell.height).rounded(.down)
         guard columns.isFinite, rows.isFinite else { return nil }
         return (UInt16(min(1000, max(2, columns))), UInt16(min(1000, max(1, rows))))
     }
@@ -744,8 +744,8 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
     }
 
     private func cursorRect(cell: CGSize) -> NSRect {
-        NSRect(x: metal.frame.minX + Self.contentInset + CGFloat(frameInfo.cursorColumn) * cell.width,
-               y: metal.frame.minY + Self.contentInset + CGFloat(frameInfo.cursorRow) * cell.height,
+        NSRect(x: metal.frame.minX + gridInset + CGFloat(frameInfo.cursorColumn) * cell.width,
+               y: metal.frame.minY + gridInset + CGFloat(frameInfo.cursorRow) * cell.height,
                width: cell.width, height: cell.height)
     }
 
@@ -831,7 +831,7 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
     /// A point in the cell grid's coordinate space, in points.
     private func gridPoint(_ event: NSEvent) -> CGPoint {
         let point = convert(event.locationInWindow, from: nil)
-        return CGPoint(x: point.x - metal.frame.minX - Self.contentInset, y: point.y - metal.frame.minY - Self.contentInset)
+        return CGPoint(x: point.x - metal.frame.minX - gridInset, y: point.y - metal.frame.minY - gridInset)
     }
 
     /// A grid point clamped into the grid, for protocols that cannot express
@@ -858,7 +858,7 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
         guard interactive, let window, let cell = renderer?.cell else { return }
         let location = convert(window.mouseLocationOutsideOfEventStream, from: nil)
         guard bounds.contains(location) else { return }
-        let point = CGPoint(x: location.x - metal.frame.minX - Self.contentInset, y: location.y - metal.frame.minY - Self.contentInset)
+        let point = CGPoint(x: location.x - metal.frame.minX - gridInset, y: location.y - metal.frame.minY - gridInset)
         hoveringLink = NSEvent.modifierFlags.contains(.command) && engine.link(at: point, cellSize: cell) != nil
         (hoveringLink ? NSCursor.pointingHand : NSCursor.iBeam).set()
     }
@@ -1150,8 +1150,8 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
                 let selected = column < columns && ILCellFlags(rawValue: cells[row * columns + column].flags).contains(.selected)
                 if selected && start == nil { start = column }
                 if !selected, let first = start {
-                    rects.append(CGRect(x: metal.frame.minX + Self.contentInset + CGFloat(first) * cellSize.width,
-                                        y: metal.frame.minY + Self.contentInset + CGFloat(row) * cellSize.height,
+                    rects.append(CGRect(x: metal.frame.minX + gridInset + CGFloat(first) * cellSize.width,
+                                        y: metal.frame.minY + gridInset + CGFloat(row) * cellSize.height,
                                         width: CGFloat(column - first) * cellSize.width, height: cellSize.height))
                     start = nil
                 }
