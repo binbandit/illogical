@@ -39,6 +39,7 @@ func init() {
 		"window.inspect":  (*Server).handleWindowInspect,
 		"window.rename":   (*Server).handleWindow,
 		"window.kill":     (*Server).handleWindow,
+		"window.move":     (*Server).handleWindow,
 		"window.zoom":     (*Server).handleWindow,
 		"layout.resize":   (*Server).handleWindow,
 		"directory.list":  (*Server).handleDirectoryList,
@@ -163,7 +164,17 @@ func (s *Server) handleNewWindow(c *client, r Request) (Message, error) {
 		return Message{}, err
 	}
 	w.Root, w.FocusedBlock = leaf(b.info.ID), b.info.ID
-	ss.Windows = append(ss.Windows, w)
+	// Like Ghostty, a new tab opens right of the current one: the requesting
+	// block's tab, else the session's focused tab.
+	current := ss.FocusedWindow
+	if placed, window := s.findWindow(r.Block); placed == ss {
+		current = window.ID
+	}
+	position := len(ss.Windows)
+	if i := windowIndex(ss.Windows, current); i >= 0 {
+		position = i + 1
+	}
+	ss.Windows = slices.Insert(ss.Windows, position, w)
 	ss.FocusedWindow = w.ID
 	if r.Method == "session.new" {
 		s.sessions = append(s.sessions, ss)
@@ -237,13 +248,21 @@ func (s *Server) handleSessionKill(_ *client, r Request) (Message, error) {
 func (s *Server) handleWindow(_ *client, r Request) (Message, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, w := s.findWindow(r.Window)
+	ss, w := s.findWindow(r.Window)
 	if w == nil {
 		return Message{}, errWindowNotFound
 	}
 	switch r.Method {
 	case "window.rename":
 		w.Name = r.Label
+	case "window.move":
+		// The tab takes r.Target's position, so moving onto a neighbour
+		// swaps the two.
+		from, to := windowIndex(ss.Windows, w.ID), windowIndex(ss.Windows, r.Target)
+		if to < 0 {
+			return Message{}, errors.New("destination tab is not in this session")
+		}
+		ss.Windows = slices.Insert(slices.Delete(ss.Windows, from, from+1), to, w)
 	case "window.kill":
 		for _, id := range w.Root.blocks() {
 			s.removeBlockLocked(id)

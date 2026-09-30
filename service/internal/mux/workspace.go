@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 )
 
@@ -231,7 +232,7 @@ func (s *Server) pruneLocked() {
 		if len(windows) == 0 {
 			continue
 		}
-		if !containsWindow(windows, ss.FocusedWindow) {
+		if windowIndex(windows, ss.FocusedWindow) < 0 {
 			ss.FocusedWindow = windows[0].ID
 		}
 		sessions = append(sessions, ss)
@@ -240,13 +241,8 @@ func (s *Server) pruneLocked() {
 	s.sessions = sessions
 }
 
-func containsWindow(windows []*Window, id string) bool {
-	for _, w := range windows {
-		if w.ID == id {
-			return true
-		}
-	}
-	return false
+func windowIndex(windows []*Window, id string) int {
+	return slices.IndexFunc(windows, func(w *Window) bool { return w.ID == id })
 }
 
 var sessionNames = []string{"quiet-cedar", "silver-tide", "drifting-pine", "gentle-orbit", "morning-fern", "distant-shore"}

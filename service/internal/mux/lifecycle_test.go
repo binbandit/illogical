@@ -156,6 +156,41 @@ func TestRestoreSetsAsideCorruptWorkspace(t *testing.T) {
 	}
 }
 
+func TestNewTabOpensRightOfCurrentAndTabsReorder(t *testing.T) {
+	_, socket := startTest(t)
+	c := connectTest(t, socket)
+	cat := []string{"/bin/cat"}
+	a := c.request(t, Request{Method: "session.new", Command: cat, KeepOpen: true})
+	b := c.request(t, Request{Method: "window.new", Block: a.Block, Command: cat, KeepOpen: true})
+	d := c.request(t, Request{Method: "window.new", Block: a.Block, Command: cat, KeepOpen: true})
+	e := c.request(t, Request{Method: "window.new", Session: a.Session, Command: cat, KeepOpen: true})
+	order := func() []string {
+		var ids []string
+		for _, w := range c.request(t, Request{Method: "state"}).State.Sessions[0].Windows {
+			ids = append(ids, w.ID)
+		}
+		return ids
+	}
+	if got, want := order(), []string{a.Window, d.Window, e.Window, b.Window}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("tab order %v, want %v", got, want)
+	}
+	c.request(t, Request{Method: "window.move", Window: e.Window, Target: a.Window})
+	c.request(t, Request{Method: "window.move", Window: d.Window, Target: b.Window})
+	if got, want := order(), []string{e.Window, a.Window, b.Window, d.Window}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("tab order after moves %v, want %v", got, want)
+	}
+	other := c.request(t, Request{Method: "session.new", Command: cat, KeepOpen: true})
+	r := Request{ID: NewID(), Method: "window.move", Window: a.Window, Target: other.Window}
+	if err := c.encoder.Encode(r); err != nil {
+		t.Fatal(err)
+	}
+	for m := c.next(t); m.ID != r.ID || m.Error == ""; m = c.next(t) {
+		if m.ID == r.ID {
+			t.Fatal("moved a tab into another session's order")
+		}
+	}
+}
+
 func TestSessionExactIDPrecedesNames(t *testing.T) {
 	_, socket := startTest(t)
 	c := connectTest(t, socket)
