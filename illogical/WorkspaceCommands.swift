@@ -164,7 +164,6 @@ enum WorkspaceCommand: String, CaseIterable, Identifiable {
         case .biggerText: [KeyboardShortcut("+")]
         case .nextTab: [KeyboardShortcut(.tab, modifiers: .control)]
         case .previousTab: [KeyboardShortcut(.tab, modifiers: [.control, .shift])]
-        case .showAllTabs: [KeyboardShortcut(.space, modifiers: [.command, .shift])]
         default: []
         }
     }

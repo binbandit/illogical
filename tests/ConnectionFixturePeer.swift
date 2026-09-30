@@ -1,10 +1,11 @@
 import Foundation
 import Darwin
 
-/// A scripted stand-in for the illogical service. It accepts connections one
-/// at a time on a private socket, greets each with hello plus the current
+/// A scripted stand-in for the illogical service. It accepts any number of
+/// clients on a private socket, greets each with hello plus the current
 /// state, records every request and answers with a plain reply unless the
-/// test installs a responder.
+/// test installs a responder. Published states and sent lines go to every
+/// connected client.
 nonisolated final class ServicePeer: @unchecked Sendable {
     struct Request: Decodable {
         let id: String
@@ -25,7 +26,7 @@ nonisolated final class ServicePeer: @unchecked Sendable {
     let path: String
     private let lock = NSLock()
     private var requests: [Request] = []
-    private var peer: Int32 = -1
+    private var peers: [Int32] = []
     private var stateJSON: String
     private var responder: (@Sendable (Request) -> [String]?)?
     private var accepted = 0
@@ -58,16 +59,19 @@ nonisolated final class ServicePeer: @unchecked Sendable {
     }
 
     func send(_ line: String) {
-        let descriptor = lock.withLock { peer }
-        guard descriptor >= 0 else { return }
-        let data = Data((line + "\n").utf8)
-        _ = data.withUnsafeBytes { Darwin.write(descriptor, $0.baseAddress, $0.count) }
+        for descriptor in lock.withLock({ peers }) { write(line, to: descriptor) }
     }
 
-    /// Drops the current client connection, as a crashed or restarted service would.
+    /// Drops every client connection, as a crashed or restarted service would.
     func disconnect() {
-        let descriptor = lock.withLock { () -> Int32 in let value = peer; peer = -1; return value }
-        if descriptor >= 0 { Darwin.shutdown(descriptor, SHUT_RDWR) }
+        let dropped = lock.withLock { () -> [Int32] in let value = peers; peers = []; return value }
+        for descriptor in dropped { Darwin.shutdown(descriptor, SHUT_RDWR) }
+    }
+
+    private func write(_ line: String, to descriptor: Int32) {
+        let data = Data((line + "\n").utf8)
+        // Writes from the test and the responder must not interleave.
+        lock.withLock { _ = data.withUnsafeBytes { Darwin.write(descriptor, $0.baseAddress, $0.count) } }
     }
 
     private func acceptLoop(_ listener: Int32) {
@@ -76,11 +80,15 @@ nonisolated final class ServicePeer: @unchecked Sendable {
             guard descriptor >= 0 else { return }
             var enabled: Int32 = 1
             setsockopt(descriptor, SOL_SOCKET, SO_NOSIGPIPE, &enabled, socklen_t(MemoryLayout.size(ofValue: enabled)))
-            let state = lock.withLock { () -> String in peer = descriptor; accepted += 1; return stateJSON }
-            send(Self.hello)
-            send(#"{"type":"state","state":"# + state + "}")
-            serve(descriptor)
-            Darwin.close(descriptor)
+            let state = lock.withLock { () -> String in accepted += 1; return stateJSON }
+            write(Self.hello, to: descriptor)
+            write(#"{"type":"state","state":"# + state + "}", to: descriptor)
+            lock.withLock { peers.append(descriptor) }
+            Thread.detachNewThread {
+                self.serve(descriptor)
+                self.lock.withLock { self.peers.removeAll { $0 == descriptor } }
+                Darwin.close(descriptor)
+            }
         }
     }
 
@@ -93,7 +101,7 @@ nonisolated final class ServicePeer: @unchecked Sendable {
             for line in lines {
                 guard let request = try? JSONDecoder().decode(Request.self, from: line) else { continue }
                 let responder = lock.withLock { () -> (@Sendable (Request) -> [String]?)? in requests.append(request); return self.responder }
-                for reply in responder?(request) ?? [#"{"type":"reply","id":"\#(request.id)"}"#] { send(reply) }
+                for reply in responder?(request) ?? [#"{"type":"reply","id":"\#(request.id)"}"#] { write(reply, to: descriptor) }
             }
         }
     }

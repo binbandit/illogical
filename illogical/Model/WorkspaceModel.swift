@@ -1027,7 +1027,9 @@ final class WorkspaceModel {
         guard searches[block] != nil else { return }
         engines[block]?.search("")
         searches.removeValue(forKey: block)
-        if searchFocusedBlock == block || focusedBlock == block { requestTerminalFocus() }
+        guard searchFocusedBlock == block else { return }
+        searchFocusedBlock = nil
+        requestTerminalFocus()
     }
 
     // MARK: Peek

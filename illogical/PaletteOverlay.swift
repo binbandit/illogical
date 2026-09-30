@@ -7,6 +7,8 @@ struct PaletteOverlay: View {
     let mode: PaletteMode
     @State private var query = ""
     @State private var selected = 0
+    /// The list's height limit, so the palette always fits the window.
+    @State private var availableHeight: CGFloat = .infinity
     @Environment(\.openWindow) private var openWindow
     @Environment(\.openSettings) private var openSettings
 
@@ -27,13 +29,17 @@ struct PaletteOverlay: View {
         return filtered + [create]
     }
 
+    private var topInset: CGFloat { mode == .sessions ? Chrome.Palette.sessionsOffset.height : Chrome.Palette.topOffset }
+
     var body: some View {
         ZStack(alignment: mode == .sessions ? .topLeading : .top) {
             Color.clear.contentShape(Rectangle()).onTapGesture { model.dismissPalette() }
             panel
-                .padding(.top, mode == .sessions ? Chrome.Palette.sessionsOffset.height : Chrome.Palette.topOffset)
+                .padding(.top, topInset)
                 .padding(.leading, mode == .sessions ? Chrome.Palette.sessionsOffset.width : 0)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: mode == .sessions ? .topLeading : .top)
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { availableHeight = $0 }
         .onAppear { selected = initialSelection }
         .onChange(of: query) { selected = query.isEmpty ? initialSelection : 0 }
         .onChange(of: mode) { query = "";selected = initialSelection }
@@ -90,7 +96,9 @@ struct PaletteOverlay: View {
 
     private var results: some View {
         let items = items
-        let maximum = mode == .directory ? Chrome.Palette.directoryMaximumHeight : Chrome.Palette.maximumHeight
+        let preferred = mode == .directory ? Chrome.Palette.directoryMaximumHeight : Chrome.Palette.maximumHeight
+        let chrome = Chrome.Palette.searchRowHeight + (mode == .directory ? Chrome.Palette.directoryHeaderHeight : 0)
+        let maximum = max(Chrome.Palette.rowHeight * 2, min(preferred, availableHeight - topInset - chrome - Chrome.Palette.bottomMargin))
         return ScrollViewReader { reader in
             ScrollView {
                 LazyVStack(spacing: Chrome.Palette.rowSpacing) {

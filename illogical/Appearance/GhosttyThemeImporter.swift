@@ -1,6 +1,6 @@
 import Foundation
 
-enum GhosttyThemeImporter {
+nonisolated enum GhosttyThemeImporter {
     struct ImportError: LocalizedError {
         let message: String
         var errorDescription: String? { message }

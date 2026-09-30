@@ -1,13 +1,21 @@
 import Foundation
 import Darwin
 
+/// Fails without trapping, so a failing test never opens the crash reporter.
+nonisolated private func expect(_ condition: @autoclosure () -> Bool, _ message: @autoclosure () -> String = "",
+                    file: StaticString = #fileID, line: UInt = #line) {
+    guard !condition() else { return }
+    FileHandle.standardError.write(Data("FAIL \(file):\(line) \(message())\n".utf8))
+    exit(1)
+}
+
 @main
 struct ServiceConnectionHandshakeTests {
     @MainActor
     static func main() async {
         let path = "/tmp/ilg-handshake-\(getpid()).sock"
         let listener = path.withCString { il_test_listen($0) }
-        precondition(listener >= 0)
+        expect(listener >= 0)
         defer { unlink(path) }
         setenv("ILLOGICAL_SOCKET", path, 1)
         let peerFinished = DispatchSemaphore(value: 0)

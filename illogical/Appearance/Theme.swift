@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-enum TerminalThemeColor: Codable, Equatable {
+nonisolated enum TerminalThemeColor: Codable, Equatable, Sendable {
     case rgb(UInt32), cellForeground, cellBackground, windowForeground, windowBackground
 
     func resolve(foreground: UInt32, background: UInt32, windowForeground: UInt32 = 0xffffff, windowBackground: UInt32 = 0) -> UInt32 {
@@ -15,7 +15,7 @@ enum TerminalThemeColor: Codable, Equatable {
     }
 }
 
-struct TerminalTheme: Codable, Identifiable, Equatable {
+nonisolated struct TerminalTheme: Codable, Identifiable, Equatable, Sendable {
     var id: String { name }
     var name: String
     var background: UInt32
@@ -94,13 +94,13 @@ struct TerminalTheme: Codable, Identifiable, Equatable {
     }()
 }
 
-enum InterfaceStyle: String, CaseIterable, Codable { case modern = "Modern", system = "System", themed = "Themed", blended = "Blended" }
-enum Density: String, CaseIterable, Codable { case comfortable = "Comfortable", compact = "Compact" }
+nonisolated enum InterfaceStyle: String, CaseIterable, Codable, Sendable { case modern = "Modern", system = "System", themed = "Themed", blended = "Blended" }
+nonisolated enum Density: String, CaseIterable, Codable, Sendable { case comfortable = "Comfortable", compact = "Compact" }
 
 extension Color {
-    init(hex: UInt32) { self.init(.sRGB, red: Double((hex >> 16) & 255) / 255, green: Double((hex >> 8) & 255) / 255, blue: Double(hex & 255) / 255, opacity: 1) }
+    nonisolated init(hex: UInt32) { self.init(.sRGB, red: Double((hex >> 16) & 255) / 255, green: Double((hex >> 8) & 255) / 255, blue: Double(hex & 255) / 255, opacity: 1) }
 }
 
 extension NSColor {
-    convenience init(hex: UInt32) { self.init(srgbRed: CGFloat((hex >> 16) & 255) / 255, green: CGFloat((hex >> 8) & 255) / 255, blue: CGFloat(hex & 255) / 255, alpha: 1) }
+    nonisolated convenience init(hex: UInt32) { self.init(srgbRed: CGFloat((hex >> 16) & 255) / 255, green: CGFloat((hex >> 8) & 255) / 255, blue: CGFloat(hex & 255) / 255, alpha: 1) }
 }

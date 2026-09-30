@@ -1,5 +1,13 @@
 import Foundation
 
+/// Fails without trapping, so a failing test never opens the crash reporter.
+nonisolated private func expect(_ condition: @autoclosure () -> Bool, _ message: @autoclosure () -> String = "",
+                    file: StaticString = #fileID, line: UInt = #line) {
+    guard !condition() else { return }
+    FileHandle.standardError.write(Data("FAIL \(file):\(line) \(message())\n".utf8))
+    exit(1)
+}
+
 @main
 struct GhosttyThemeImportTests {
     static func main() throws {
@@ -26,11 +34,11 @@ struct GhosttyThemeImportTests {
         try write(locations.xdg.appendingPathComponent("second"), "background=#666666\n")
         try write(locations.xdg.appendingPathComponent("grandchild"), "background=#777777\nconfig-file=first\n")
         let entries = try GhosttyThemeImporter.configurationEntries(locations: locations)
-        precondition(entries.filter { $0.0 == "background" }.map { $0.1 } == ["#111111", "#222222", "#333333", "#444444", "#555555", "#666666", "#777777"])
+        expect(entries.filter { $0.0 == "background" }.map { $0.1 } == ["#111111", "#222222", "#333333", "#444444", "#555555", "#666666", "#777777"])
         var imported = try GhosttyThemeImporter.importConfiguration(locations: locations)[0]
-        precondition(imported.background == 0x777777 && imported.palette[200] == 0x010203)
-        precondition(imported.selectionForeground == .windowBackground && imported.selectionBackground == .windowForeground)
-        precondition(imported.minimumContrast == 1 && imported.accent == 0xffffff)
+        expect(imported.background == 0x777777 && imported.palette[200] == 0x010203)
+        expect(imported.selectionForeground == .windowBackground && imported.selectionBackground == .windowForeground)
+        expect(imported.minimumContrast == 1 && imported.accent == 0xffffff)
         for file in files { try write(file, "") }
         let themeFile = locations.xdg.appendingPathComponent("themes/Named Theme")
         try write(themeFile, """
@@ -52,21 +60,21 @@ struct GhosttyThemeImportTests {
         """)
         try write(files[0], "theme=\"Named Theme\"\nforeground=#fedcba\n")
         imported = try GhosttyThemeImporter.importConfiguration(locations: locations)[0]
-        precondition(imported.background == 0xaabbcc && imported.foreground == 0xfedcba)
-        precondition(imported.palette[255] == 0x123456 && imported.palette[16] == 0xff0000 && imported.palette[17] == 0x123456)
-        precondition(imported.cursorColor == .cellBackground && imported.cursorText == .cellForeground)
-        precondition(imported.selectionForeground == .cellBackground && imported.selectionBackground == .rgb(0xaabbcc))
-        precondition(imported.minimumContrast == 7 && imported.backgroundOpacity == 0.5 && imported.backgroundOpacityCells == true)
-        precondition(imported.wire.palette == imported.palette && imported.wire.palette?.count == 256)
+        expect(imported.background == 0xaabbcc && imported.foreground == 0xfedcba)
+        expect(imported.palette[255] == 0x123456 && imported.palette[16] == 0xff0000 && imported.palette[17] == 0x123456)
+        expect(imported.cursorColor == .cellBackground && imported.cursorText == .cellForeground)
+        expect(imported.selectionForeground == .cellBackground && imported.selectionBackground == .rgb(0xaabbcc))
+        expect(imported.minimumContrast == 7 && imported.backgroundOpacity == 0.5 && imported.backgroundOpacityCells == true)
+        expect(imported.wire.palette == imported.palette && imported.wire.palette?.count == 256)
         let roundTrip = try JSONDecoder().decode(TerminalTheme.self, from: JSONEncoder().encode(imported))
-        precondition(roundTrip == imported)
+        expect(roundTrip == imported)
         let legacy = Data(#"{"name":"Old","background":0,"foreground":16777215,"accent":123,"ansi":[1,2],"isLight":false}"#.utf8)
         let decoded = try JSONDecoder().decode(TerminalTheme.self, from: legacy)
-        precondition(decoded.extendedPalette == nil && decoded.minimumContrast == nil && decoded.effectiveBackgroundOpacity == 1 && decoded.palette.count == 256)
+        expect(decoded.extendedPalette == nil && decoded.minimumContrast == nil && decoded.effectiveBackgroundOpacity == 1 && decoded.palette.count == 256)
 
         try write(files[0], "theme=dark : Named Theme, light : Named Theme\nminimum-contrast=100\nbackground-opacity=-1\n")
         let pair = try GhosttyThemeImporter.importConfiguration(locations: locations)
-        precondition(pair.count == 2 && pair[0].name != pair[1].name && pair.allSatisfy { $0.minimumContrast == 21 && $0.backgroundOpacity == 0 })
+        expect(pair.count == 2 && pair[0].name != pair[1].name && pair.allSatisfy { $0.minimumContrast == 21 && $0.backgroundOpacity == 0 })
         for value in ["light:Named Theme", "light:Named Theme,light:Named Theme", "Named Theme,Other", "light=Named Theme,dark=Named Theme"] {
             try write(files[0], "theme=\(value)"); rejects { _ = try GhosttyThemeImporter.importConfiguration(locations: locations) }
         }
@@ -76,26 +84,26 @@ struct GhosttyThemeImportTests {
         for name in [themeFile.path, "~/xdg/ghostty/themes/Named Theme"] {
             try write(files[0], "theme=\(name)")
             let direct = try GhosttyThemeImporter.importConfiguration(locations: locations)[0]
-            precondition(direct.background == 0xaabbcc)
+            expect(direct.background == 0xaabbcc)
         }
         try write(files[0], "config-file=missing-required"); rejects { _ = try GhosttyThemeImporter.importConfiguration(locations: locations) }
         try write(files[0], "config-file=missing-required\nconfig-file=\nbackground=black")
         let reset = try GhosttyThemeImporter.importConfiguration(locations: locations)[0]
-        precondition(reset.background == 0)
+        expect(reset.background == 0)
 
         try write(files[0], "background=#f0e0d0\nforeground=#123456\npalette=200=#102030\npalette-generate=true\npalette-harmonious=true\n")
         imported = try GhosttyThemeImporter.importConfiguration(locations: locations)[0]
         var expected = [UInt32](repeating: 0, count: 256), mask = [Bool](repeating: false, count: 256)
         il_palette_default(&expected); expected[200] = 0x102030; mask[200] = true
         il_palette_generate(&expected, &mask, 0xf0e0d0, 0x123456, true)
-        precondition(imported.palette == expected && expected[200] == 0x102030)
-        precondition(TerminalThemeColor.cellForeground.resolve(foreground: 1, background: 2) == 1)
-        precondition(TerminalThemeColor.cellBackground.resolve(foreground: 1, background: 2) == 2)
-        precondition(TerminalThemeColor.windowForeground.resolve(foreground: 1, background: 2, windowForeground: 3) == 3)
-        precondition(TerminalThemeColor.windowBackground.resolve(foreground: 1, background: 2, windowBackground: 4) == 4)
-        precondition(ContrastCorrection.correct(0x777777, background: 0x777777, target: 0xffffff, minimumContrast: 1) == 0x777777)
-        precondition(ContrastCorrection.correct(0xaaaaaa, background: 0, target: 0xffffff, minimumContrast: 21) == 0xffffff)
-        precondition(ContrastCorrection.correct(0xaaaaaa, background: 0xffffff, target: 0, minimumContrast: 21) == 0)
+        expect(imported.palette == expected && expected[200] == 0x102030)
+        expect(TerminalThemeColor.cellForeground.resolve(foreground: 1, background: 2) == 1)
+        expect(TerminalThemeColor.cellBackground.resolve(foreground: 1, background: 2) == 2)
+        expect(TerminalThemeColor.windowForeground.resolve(foreground: 1, background: 2, windowForeground: 3) == 3)
+        expect(TerminalThemeColor.windowBackground.resolve(foreground: 1, background: 2, windowBackground: 4) == 4)
+        expect(ContrastCorrection.correct(0x777777, background: 0x777777, target: 0xffffff, minimumContrast: 1) == 0x777777)
+        expect(ContrastCorrection.correct(0xaaaaaa, background: 0, target: 0xffffff, minimumContrast: 21) == 0xffffff)
+        expect(ContrastCorrection.correct(0xaaaaaa, background: 0xffffff, target: 0, minimumContrast: 21) == 0)
         print("Theme import: ordered defaults, deferred breadth-first includes, cycles/optional/reset, exact Ghostty colors and 256-palette generation, light/dark validation, selection/cursor colors, contrast/opacity, wire palette, and backward Codable passed.")
     }
 }

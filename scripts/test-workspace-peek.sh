@@ -19,7 +19,7 @@ swiftc -g -swift-version 5 -target arm64-apple-macos15 -I illogical/Terminal -I 
   illogical/Terminal/TerminalEngine.swift illogical/Terminal/TerminalSurface.swift illogical/Terminal/MetalRenderer.swift illogical/Terminal/TerminalPresentationState.swift \
   illogical/Terminal/TerminalFont.swift illogical/Terminal/TerminalTextRuns.swift illogical/Terminal/TerminalFontOptions.swift illogical/Terminal/TerminalCellGeometry.swift illogical/Terminal/TerminalCellDrawing.swift \
   illogical/Appearance/ContrastCorrection.swift illogical/Appearance/Theme.swift illogical/Appearance/GhosttyThemeImporter.swift \
-  illogical/Model/Protocol.swift illogical/Model/JSONLineFramer.swift illogical/Model/InboundMailbox.swift illogical/Model/ServiceConnection.swift illogical/Model/WorkspaceModel.swift illogical/Model/TerminalSearchState.swift \
+  illogical/Model/*.swift \
   illogical/LaunchMetrics.swift tests/WorkspacePeekTests.swift \
   .build/tests/peek/Bridge.o .build/ghostty/lib/libghostty-vt.a \
   -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker .build/tests/peek/Info.plist \

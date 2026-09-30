@@ -72,8 +72,8 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 520)
-        .fixedSize(horizontal: false, vertical: true)
+        // A fixed height that fits small displays; the form scrolls.
+        .frame(width: 520, height: 600)
         .sheet(isPresented: $showAddHost) { AddHostSheet() }
         .sheet(isPresented: Binding(get: { !importedThemes.isEmpty }, set: { if !$0 { importedThemes = [] } })) {
             MigrationSheet(themes: importedThemes, tint: preferences.theme.tint) { adopt in

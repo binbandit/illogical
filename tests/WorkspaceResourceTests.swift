@@ -9,13 +9,13 @@ struct WorkspaceResourceTests {
         UserDefaults.standard.removePersistentDomain(forName: domain)
         defer { UserDefaults.standard.removePersistentDomain(forName: domain) }
         let model = WorkspaceModel()
-        model.addHost(name: "Resource fixture", address: "invalid.invalid", executable: "illogical")
+        HostProfileStore.shared.add(name: "Resource fixture", address: "invalid.invalid", executable: "illogical")
         let host = model.hosts.first { !$0.isLocal }!
         weak let removed = model.engine(for: "removed-block", host: host.id)
         weak let retained = model.engine(for: "retained-block", host: "local")
-        model.focusedBlock = "removed-block"; model.find()
+        model.focus("removed-block"); model.find()
         model.searches["removed-block"]?.query = "retained query"
-        model.removeHost(host)
+        HostProfileStore.shared.remove(host.id)
         guard removed == nil else { fail("removing a host retains its terminal replica/history") }
         guard retained != nil else { fail("removing a host discarded another host's viewport") }
         guard model.searchFocusedBlock == nil, model.searches["removed-block"] == nil else {
@@ -35,7 +35,7 @@ struct WorkspaceResourceTests {
             try? await Task.sleep(for: .milliseconds(5))
         }
         guard connected.states["local"]?.revision == 1, disappeared != nil else { fail("workspace fixture never attached") }
-        connected.synchronizeViewports = true
+        Preferences.shared.synchronizeViewports = true
         disappeared?.scrollBottom()
         var compatibilityComplete = false
         connected.send(WireRequest(id: "compatibility", method: "test.compatibility")) { _ in compatibilityComplete = true }
@@ -45,7 +45,7 @@ struct WorkspaceResourceTests {
         guard compatibilityComplete, !connected.supportsViewportSync(), connected.notice == nil else {
             fail("an older service without capabilities received unsupported viewport requests")
         }
-        connected.focusedBlock = "gone"; connected.find(); connected.searches["gone"]?.query = "query"
+        connected.focus("gone"); connected.find(); connected.searches["gone"]?.query = "query"
         connected.send(WireRequest(method: "test.drop"))
         while connected.states["local"]?.revision != 2 && DispatchTime.now().uptimeNanoseconds < deadline {
             try? await Task.sleep(for: .milliseconds(5))

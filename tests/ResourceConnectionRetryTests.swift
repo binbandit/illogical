@@ -1,6 +1,14 @@
 import Foundation
 import Darwin
 
+/// Fails without trapping, so a failing test never opens the crash reporter.
+nonisolated private func expect(_ condition: @autoclosure () -> Bool, _ message: @autoclosure () -> String = "",
+                    file: StaticString = #fileID, line: UInt = #line) {
+    guard !condition() else { return }
+    FileHandle.standardError.write(Data("FAIL \(file):\(line) \(message())\n".utf8))
+    exit(1)
+}
+
 @main
 struct ResourceConnectionRetryTests {
     @MainActor
@@ -9,13 +17,13 @@ struct ResourceConnectionRetryTests {
         for attempt in 0..<100 {
             let delay = backoff.nextDelay()
             let base = min(30.0, pow(2.0, Double(min(attempt + 1, 5))))
-            precondition(delay >= base * 0.9 && delay <= min(30, base * 1.1))
+            expect(delay >= base * 0.9 && delay <= min(30, base * 1.1))
         }
         backoff.reset()
-        precondition((1.8...2.2).contains(backoff.nextDelay()))
+        expect((1.8...2.2).contains(backoff.nextDelay()))
         let path = "/tmp/ilg-resource-retry-\(getpid()).sock"
         let listener = path.withCString { il_resource_listen($0) }
-        precondition(listener >= 0)
+        expect(listener >= 0)
         defer { unlink(path) }
         setenv("ILLOGICAL_SOCKET", path, 1)
         DispatchQueue.global().async { il_resource_serve_retries(listener) }

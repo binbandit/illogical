@@ -1,6 +1,14 @@
 import Foundation
 import Darwin
 
+/// Fails without trapping, so a failing test never opens the crash reporter.
+nonisolated private func expect(_ condition: @autoclosure () -> Bool, _ message: @autoclosure () -> String = "",
+                    file: StaticString = #fileID, line: UInt = #line) {
+    guard !condition() else { return }
+    FileHandle.standardError.write(Data("FAIL \(file):\(line) \(message())\n".utf8))
+    exit(1)
+}
+
 nonisolated private final class PeerFixture: @unchecked Sendable {
     enum Mode { case stalledThenReply, readWithoutReply }
     let path: String
@@ -16,7 +24,7 @@ nonisolated private final class PeerFixture: @unchecked Sendable {
         self.mode = mode
         path = "/tmp/ilg-outbound-\(getpid())-\(UUID().uuidString.prefix(8)).sock"
         listener = path.withCString { il_test_listen($0) }
-        precondition(listener >= 0)
+        expect(listener >= 0)
         DispatchQueue.global().async { self.acceptPeers() }
     }
     var received: [String] { lock.lock(); defer { lock.unlock() }; return methods }
@@ -101,23 +109,23 @@ nonisolated private final class PeerFixture: @unchecked Sendable {
             if connection.send(request, completion: { reply in
                 completions += 1
                 if !completed.insert(reply.id!).inserted { duplicate = true }
-                precondition(reply.error != nil)
+                expect(reply.error != nil)
             }) { accepted += 1 }
             let usage = connection.outboundUsage
-            precondition(usage.bytes <= 8 * 1024 * 1024 && usage.items <= 1024 && usage.callbacks <= 1024)
+            expect(usage.bytes <= 8 * 1024 * 1024 && usage.items <= 1024 && usage.callbacks <= 1024)
         }
-        precondition(accepted > 0 && accepted < 2048 && failures == 2048 - accepted)
-        precondition(completions == 2048 - accepted)
+        expect(accepted > 0 && accepted < 2048 && failures == 2048 - accepted)
+        expect(completions == 2048 - accepted)
         let start = DispatchTime.now().uptimeNanoseconds
         connection.connect()
         let cancellationMS = Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000
-        precondition(cancellationMS < 100, "cancelling stalled writer blocked MainActor")
-        precondition(completions == 2048 && !duplicate)
+        expect(cancellationMS < 100, "cancelling stalled writer blocked MainActor")
+        expect(completions == 2048 && !duplicate)
         await wait("new generation hello") { hellos.count == 2 }
         var freshReply = false
-        precondition(connection.send(WireRequest(method: "fresh")) { freshReply = $0.error == nil })
+        expect(connection.send(WireRequest(method: "fresh")) { freshReply = $0.error == nil })
         await wait("new generation request") { freshReply }
-        precondition(fixture.received == ["fresh"], "old queued requests leaked into a new transport")
+        expect(fixture.received == ["fresh"], "old queued requests leaked into a new transport")
         connection.close()
         print("  stalled peer: \(accepted) accepted, \(failures) explicitly rejected; cancel \(Int(cancellationMS))ms; callbacks exactly once.")
     }
@@ -132,11 +140,11 @@ nonisolated private final class PeerFixture: @unchecked Sendable {
         connection.connect(); await wait("callback fixture hello") { hello }
         let duplicate = WireRequest(id: "duplicate", method: "duplicate-check")
         var duplicateCompletion = 0
-        precondition(connection.send(duplicate) { _ in duplicateCompletion += 1 })
-        precondition(!connection.send(duplicate) { reply in precondition(reply.error != nil); duplicateCompletion += 1 })
-        precondition(duplicateCompletion == 1)
+        expect(connection.send(duplicate) { _ in duplicateCompletion += 1 })
+        expect(!connection.send(duplicate) { reply in expect(reply.error != nil); duplicateCompletion += 1 })
+        expect(duplicateCompletion == 1)
         connection.close()
-        precondition(duplicateCompletion == 2)
+        expect(duplicateCompletion == 2)
         hello = false; errors = 0
         connection.connect(); await wait("callback fixture reconnect") { hello }
 
@@ -144,9 +152,9 @@ nonisolated private final class PeerFixture: @unchecked Sendable {
             connection.send(WireRequest(method: "pending-\(index)")) { _ in completions += 1 }
             if index % 128 == 0 { try? await Task.sleep(for: .milliseconds(2)) }
         }
-        precondition(connection.outboundUsage.callbacks == 1024 && errors == 1024 && completions == 1024)
+        expect(connection.outboundUsage.callbacks == 1024 && errors == 1024 && completions == 1024)
         connection.close()
-        precondition(completions == 2048 && connection.outboundUsage.callbacks == 0)
+        expect(completions == 2048 && connection.outboundUsage.callbacks == 0)
     }
     @MainActor static func writerFailure() async {
         let fixture = PeerFixture(mode: .stalledThenReply)
@@ -157,14 +165,14 @@ nonisolated private final class PeerFixture: @unchecked Sendable {
         connection.onMessage = { if $0.type == "hello" { hellos += 1 } }
         connection.onStatus = { _ in statuses += 1 }
         connection.connect(); await wait("failure fixture hello") { hellos == 1 }
-        for _ in 0..<8 { connection.send(WireRequest(method: "uncertain", data: Data(repeating: 66, count: 512 * 1024))) { reply in precondition(reply.error != nil); completions += 1 } }
+        for _ in 0..<8 { connection.send(WireRequest(method: "uncertain", data: Data(repeating: 66, count: 512 * 1024))) { reply in expect(reply.error != nil); completions += 1 } }
         fixture.breakFirstConnection()
         await wait("failed writer cancelled callbacks") { statuses > 0 && completions == 8 }
         await wait("failed writer reconnect", seconds: 4) { hellos == 2 }
         var replied = false
         connection.send(WireRequest(method: "after-failure")) { replied = $0.error == nil }
         await wait("reconnected writer") { replied }
-        precondition(fixture.received == ["after-failure"], "uncertain input was replayed automatically")
+        expect(fixture.received == ["after-failure"], "uncertain input was replayed automatically")
         connection.close()
     }
 }

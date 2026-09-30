@@ -57,8 +57,9 @@ struct WorkspaceView: View {
                     WorkspaceArea(model: model)
                 }
             }
-            if let mode = model.palette { PaletteOverlay(model: model, mode: mode) }
         }
+        // An overlay never changes the layout beneath it, however tall it is.
+        .overlay { if let mode = model.palette { PaletteOverlay(model: model, mode: mode) } }
         .overlay(alignment: .bottom) { NoticeBanner(model: model) }
         .backgroundPreferenceValue(PaneFrames.self) { panes in
             WindowBackground(theme: theme, style: preferences.interfaceStyle, opacity: backgroundOpacity, panes: panes)

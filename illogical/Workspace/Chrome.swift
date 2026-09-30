@@ -108,6 +108,11 @@ enum Chrome {
         static let sessionsOffset = CGSize(width: 86, height: 43)
         static let maximumHeight: CGFloat = 380
         static let directoryMaximumHeight: CGFloat = 440
+        /// Space for the query row and the directory path row above the list.
+        static let searchRowHeight: CGFloat = 45
+        static let directoryHeaderHeight: CGFloat = 38
+        /// Kept free below the palette in short windows.
+        static let bottomMargin: CGFloat = 16
         static let titleSize: CGFloat = 12
         static let detailSize: CGFloat = 10
         static let shadowRadius: CGFloat = 20

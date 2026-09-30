@@ -1,5 +1,13 @@
 import Foundation
 
+/// Fails without trapping, so a failing test never opens the crash reporter.
+nonisolated private func expect(_ condition: @autoclosure () -> Bool, _ message: @autoclosure () -> String = "",
+                    file: StaticString = #fileID, line: UInt = #line) {
+    guard !condition() else { return }
+    FileHandle.standardError.write(Data("FAIL \(file):\(line) \(message())\n".utf8))
+    exit(1)
+}
+
 nonisolated private func message(_ type: String, block: String = "a", stream: String = "one", bytes: Data? = nil) -> InboundMailbox.Event {
     .message(WireMessage(type: type, block: block, stream: stream, data: bytes))
 }
@@ -19,7 +27,7 @@ enum InboundMailboxTests {
             guard case .accepted(let schedule) = queue.enqueue(event) else { fatalError("Rejected valid stream") }
             if schedule { scheduled += 1 }
         }
-        precondition(scheduled == 1, "One notification schedules the entire pending stream")
+        expect(scheduled == 1, "One notification schedules the entire pending stream")
         let batch = queue.takeBatch()
         var seen: [String] = []
         for event in batch {
@@ -28,8 +36,8 @@ enum InboundMailboxTests {
             case .finished(let reason): seen.append("EOF:\(reason!)")
             }
         }
-        precondition(seen == ["snapshot:a:one:[1]", "output:a:one:[2, 3]", "history:a:one:[4]", "output:a:one:[5]", "output:b:one:[6]", "output:b:two:[7]", "EOF:end"], "Coalescing must preserve all protocol barriers and EOF order")
-        precondition(!queue.finishDrain())
+        expect(seen == ["snapshot:a:one:[1]", "output:a:one:[2, 3]", "history:a:one:[4]", "output:a:one:[5]", "output:b:one:[6]", "output:b:two:[7]", "EOF:end"], "Coalescing must preserve all protocol barriers and EOF order")
+        expect(!queue.finishDrain())
         guard case .cancelled = queue.enqueue(message("output")) else { fatalError("Data accepted after EOF") }
 
         for countBound in [false, true] {
@@ -42,10 +50,10 @@ enum InboundMailboxTests {
                 guard case .accepted = limited.enqueue(packet) else { fatalError("Drain did not release producer") }
                 completed.signal()
             }
-            precondition(attempted.wait(timeout: .now() + 2) == .success)
-            precondition(completed.wait(timeout: .now() + 0.05) == .timedOut, "Producer must wait at the byte/count limit")
-            precondition(limited.takeBatch(maximumBytes: 1).count == 1)
-            precondition(completed.wait(timeout: .now() + 2) == .success, "Consumer progress must wake producer")
+            expect(attempted.wait(timeout: .now() + 2) == .success)
+            expect(completed.wait(timeout: .now() + 0.05) == .timedOut, "Producer must wait at the byte/count limit")
+            expect(limited.takeBatch(maximumBytes: 1).count == 1)
+            expect(completed.wait(timeout: .now() + 2) == .success, "Consumer progress must wake producer")
             limited.cancel()
         }
 
@@ -57,11 +65,11 @@ enum InboundMailboxTests {
             guard case .cancelled = cancelled.enqueue(.finished(nil)) else { fatalError("Cancelled producer published EOF") }
             released.signal()
         }
-        precondition(blocked.wait(timeout: .now() + 2) == .success)
-        precondition(released.wait(timeout: .now() + 0.05) == .timedOut)
+        expect(blocked.wait(timeout: .now() + 2) == .success)
+        expect(released.wait(timeout: .now() + 0.05) == .timedOut)
         cancelled.cancel()
-        precondition(released.wait(timeout: .now() + 2) == .success)
-        precondition(cancelled.takeBatch().isEmpty && !cancelled.finishDrain())
+        expect(released.wait(timeout: .now() + 2) == .success)
+        expect(cancelled.takeBatch().isEmpty && !cancelled.finishDrain())
 
         // Drain and enqueue race repeatedly, as happens between display frames.
         let streaming = InboundMailbox(maximumBytes: 1024 * 1024, maximumItems: 64)
@@ -77,18 +85,18 @@ enum InboundMailboxTests {
         }
         var offset = 0, eof = false
         while !eof {
-            precondition(ready.wait(timeout: .now() + 5) == .success, "Lost wakeup in streaming delivery")
+            expect(ready.wait(timeout: .now() + 5) == .success, "Lost wakeup in streaming delivery")
             repeat {
                 for event in streaming.takeBatch() {
                     switch event {
                     case .message(let value):
-                        for byte in value.data! { precondition(byte == UInt8((offset / 4096) % 251)); offset += 1 }
+                        for byte in value.data! { expect(byte == UInt8((offset / 4096) % 251)); offset += 1 }
                     case .finished: eof = true
                     }
                 }
             } while streaming.finishDrain()
         }
-        precondition(offset == 32 * 1024 * 1024 && finished.wait(timeout: .now() + 2) == .success)
+        expect(offset == 32 * 1024 * 1024 && finished.wait(timeout: .now() + 2) == .success)
         print("Connection delivery: 32MiB ordered stream, barriers/EOF, coalescing, byte/count backpressure, cancellation and wakeups passed.")
     }
 }
