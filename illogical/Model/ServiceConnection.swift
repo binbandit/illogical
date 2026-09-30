@@ -22,7 +22,7 @@ final class ServiceConnection {
     private var mayUpgradeLocalHelper = false
     private var hasSubmittedRequest = false
     private var reconnectTask: Task<Void, Never>?
-    private var reconnectBackoff = ReconnectBackoff()
+    private var reconnectBackoff: ReconnectBackoff
     private static let maximumCallbacks = 1024
 
     var outboundUsage: (bytes: Int, items: Int, callbacks: Int) {
@@ -30,7 +30,10 @@ final class ServiceConnection {
         return (usage.bytes, usage.items, callbacks.count)
     }
 
-    init(host: HostProfile) { self.host = host }
+    init(host: HostProfile) {
+        self.host = host
+        reconnectBackoff = host.isLocal ? .local : .remote
+    }
     isolated deinit { releaseTransport() }
 
     func connect() {
@@ -286,13 +289,27 @@ final class ServiceConnection {
 }
 
 nonisolated struct ReconnectBackoff {
-    private var next = 2.0
+    /// The local helper restarts the service on demand, so a dropped local
+    /// connection comes back almost immediately.
+    static let local = ReconnectBackoff(initial: 0.25, maximum: 5)
+    /// Remote hosts can stay unreachable for a while; don't hammer them.
+    static let remote = ReconnectBackoff(initial: 2, maximum: 30)
 
-    mutating func reset() { next = 2 }
+    private let initial: Double
+    private let maximum: Double
+    private var next: Double
+
+    init(initial: Double, maximum: Double) {
+        self.initial = initial
+        self.maximum = maximum
+        next = initial
+    }
+
+    mutating func reset() { next = initial }
 
     mutating func nextDelay() -> Double {
-        let delay = min(30, next * Double.random(in: 0.9...1.1))
-        next = min(30, next * 2)
+        let delay = min(maximum, next * Double.random(in: 0.9...1.1))
+        next = min(maximum, next * 2)
         return delay
     }
 }

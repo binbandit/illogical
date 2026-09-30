@@ -13,14 +13,16 @@ nonisolated private func expect(_ condition: @autoclosure () -> Bool, _ message:
 struct ResourceConnectionRetryTests {
     @MainActor
     static func main() async {
-        var backoff = ReconnectBackoff()
-        for attempt in 0..<100 {
-            let delay = backoff.nextDelay()
-            let base = min(30.0, pow(2.0, Double(min(attempt + 1, 5))))
-            expect(delay >= base * 0.9 && delay <= min(30, base * 1.1))
+        for (policy, initial, maximum) in [(ReconnectBackoff.remote, 2.0, 30.0), (ReconnectBackoff.local, 0.25, 5.0)] {
+            var backoff = policy
+            for attempt in 0..<100 {
+                let delay = backoff.nextDelay()
+                let base = min(maximum, initial * pow(2.0, Double(min(attempt, 20))))
+                expect(delay >= base * 0.9 && delay <= min(maximum, base * 1.1), "attempt \(attempt): \(delay)")
+            }
+            backoff.reset()
+            expect((initial * 0.9...initial * 1.1).contains(backoff.nextDelay()))
         }
-        backoff.reset()
-        expect((1.8...2.2).contains(backoff.nextDelay()))
         let path = "/tmp/ilg-resource-retry-\(getpid()).sock"
         let listener = path.withCString { il_resource_listen($0) }
         expect(listener >= 0)
@@ -39,7 +41,7 @@ struct ResourceConnectionRetryTests {
         }
         guard failures.count >= 3 else { fail("did not observe three actual reconnects") }
         let secondDelay = Double(failures[2] - failures[1]) / 1e9
-        guard (3.5...4.8).contains(secondDelay) else {
+        guard (0.4...1.0).contains(secondDelay) else {
             connection.close()
             fail("offline retry did not back off: second delay \(secondDelay)s")
         }
@@ -48,7 +50,7 @@ struct ResourceConnectionRetryTests {
         }
         guard failures.count == 4, hellos == 1 else { fail("successful greeting did not reconnect") }
         let recoveredDelay = Double(failures[3] - failures[2]) / 1e9
-        guard (1.7...2.6).contains(recoveredDelay) else { fail("greeting did not reset backoff: \(recoveredDelay)s") }
+        guard (0.2...0.7).contains(recoveredDelay) else { fail("greeting did not reset backoff: \(recoveredDelay)s") }
         let manualStart = DispatchTime.now().uptimeNanoseconds
         connection.connect()
         while failures.count < 5 && DispatchTime.now().uptimeNanoseconds - manualStart < 1_000_000_000 {
@@ -58,7 +60,7 @@ struct ResourceConnectionRetryTests {
         guard failures.count == 5, Double(failures[4] - manualStart) / 1e9 < 0.5 else {
             fail("explicit connect was delayed by retry backoff")
         }
-        try? await Task.sleep(for: .milliseconds(2300))
+        try? await Task.sleep(for: .milliseconds(1500))
         guard failures.count == 5 else { fail("close did not cancel a pending reconnect") }
         print("Actual socket retries: exponential delay, hello reset, immediate manual connect and close cancellation passed.")
     }
