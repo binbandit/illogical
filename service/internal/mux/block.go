@@ -39,6 +39,7 @@ type Block struct {
 	inputReadAllowance int // Owned by readLoop, bounded escape from echo deadlock.
 	done               chan struct{}
 	io                 sync.WaitGroup
+	exited             chan struct{} // Closed once the child has been reaped.
 	replyReady         chan struct{}
 	replies            []byte
 	replyOverflow      bool
@@ -120,33 +121,45 @@ func (s *Server) newBlock(r Request, id string) (*Block, error) {
 	b.inputWake = make(chan struct{}, 1)
 	b.viewerWake = make(chan struct{}, 1)
 	b.done = make(chan struct{})
+	b.exited = make(chan struct{})
 	b.replyReady = make(chan struct{}, 1)
 	b.io.Add(2)
 	go b.writeLoop()
 	go b.readLoop()
-	go func() {
-		err := b.cmd.Wait()
-		code := 0
-		if err != nil {
-			code = b.cmd.ProcessState.ExitCode()
-			if status, ok := b.cmd.ProcessState.Sys().(syscall.WaitStatus); ok && status.Signaled() {
-				code = 128 + int(status.Signal())
-			}
-		}
-		b.mu.Lock()
-		b.info.ExitCode = &code
-		b.event(Message{Event: "child_exited", ExitCode: &code})
-		b.mu.Unlock()
-		s.changed()
-		if !r.KeepOpen {
-			select {
-			case s.finished <- id:
-			case <-s.stop:
-			}
-		}
-	}()
+	go b.waitForExit(r.KeepOpen)
 	s.parkingChanged()
 	return b, nil
+}
+
+// waitForExit reaps the child and reports its status. Unless the block was
+// asked to stay open, the service then removes it from the workspace.
+func (b *Block) waitForExit(keepOpen bool) {
+	_ = b.cmd.Wait()
+	close(b.exited)
+	code := exitCode(b.cmd.ProcessState)
+	b.mu.Lock()
+	b.info.ExitCode = &code
+	b.event(Message{Event: "child_exited", ExitCode: &code})
+	b.mu.Unlock()
+	s := b.server
+	s.changed()
+	if !keepOpen {
+		select {
+		case s.finished <- b.info.ID:
+		case <-s.stop:
+		}
+	}
+}
+
+// exitCode follows shell convention: 128+N for a child killed by signal N.
+func exitCode(state *os.ProcessState) int {
+	if state == nil {
+		return 1
+	}
+	if status, ok := state.Sys().(syscall.WaitStatus); ok && status.Signaled() {
+		return 128 + int(status.Signal())
+	}
+	return state.ExitCode()
 }
 
 // Call with b.mu held. Routing is captured when the event occurs, independently
@@ -466,6 +479,9 @@ func (b *Block) park(force bool) error {
 	return nil
 }
 
+// close hangs up the terminal the way closing a terminal window does: the
+// shell's process group and the foreground job get SIGHUP. A shell that
+// survives without its PTY is killed after a grace period so it is reaped.
 func (b *Block) close() {
 	b.mu.Lock()
 	if b.closed {
@@ -474,8 +490,18 @@ func (b *Block) close() {
 	}
 	b.closed = true
 	close(b.done)
-	if b.cmd.Process != nil && b.info.ExitCode == nil {
-		_ = syscall.Kill(-b.cmd.Process.Pid, syscall.SIGHUP)
+	running := true
+	select {
+	case <-b.exited:
+		running = false
+	default:
+	}
+	if running {
+		pid := b.cmd.Process.Pid
+		if foreground := foregroundProcess(b.pty); foreground > 0 && foreground != pid {
+			_ = syscall.Kill(-foreground, syscall.SIGHUP)
+		}
+		_ = syscall.Kill(-pid, syscall.SIGHUP)
 	}
 	_ = b.pty.Close()
 	if b.terminal != nil {
@@ -484,6 +510,21 @@ func (b *Block) close() {
 	}
 	b.mu.Unlock()
 	b.io.Wait()
+	if running {
+		go b.killAfter(hangupGracePeriod)
+	}
+}
+
+const hangupGracePeriod = 2 * time.Second
+
+func (b *Block) killAfter(grace time.Duration) {
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+	select {
+	case <-b.exited:
+	case <-timer.C:
+		_ = syscall.Kill(-b.cmd.Process.Pid, syscall.SIGKILL)
+	}
 }
 
 func (b *Block) capture(format string) (string, error) {

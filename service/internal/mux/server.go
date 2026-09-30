@@ -130,11 +130,22 @@ func (s *Server) Close() {
 			_ = remote.listener.Close()
 		}
 		_ = s.persistLocked()
+		blocks := make([]*Block, 0, len(s.blocks))
 		for _, b := range s.blocks {
 			_ = b.park(true)
 			b.close()
+			blocks = append(blocks, b)
 		}
 		s.mu.Unlock()
+		// Nothing outlives the service to reap a shell that ignores SIGHUP.
+		deadline := time.Now().Add(hangupGracePeriod)
+		for _, b := range blocks {
+			select {
+			case <-b.exited:
+			case <-time.After(time.Until(deadline)):
+				_ = syscall.Kill(-b.cmd.Process.Pid, syscall.SIGKILL)
+			}
+		}
 		s.clientsMu.Lock()
 		for _, c := range s.clients {
 			c.close("service_shutdown")
