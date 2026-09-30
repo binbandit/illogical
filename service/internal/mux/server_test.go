@@ -20,12 +20,24 @@ type testClient struct {
 	encoder *json.Encoder
 }
 
-func startTest(t *testing.T) (*Server, string) {
+// testDirectory is short enough for a Unix socket path, unlike t.TempDir on macOS.
+func testDirectory(t *testing.T) string {
 	t.Helper()
 	directory, err := os.MkdirTemp("/tmp", "illogical-test-")
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { os.RemoveAll(directory) })
+	return directory
+}
+
+func startTest(t *testing.T) (*Server, string) {
+	t.Helper()
+	return startTestIn(t, testDirectory(t))
+}
+
+func startTestIn(t *testing.T, directory string) (*Server, string) {
+	t.Helper()
 	socket := filepath.Join(directory, "s.sock")
 	s, err := NewServer(directory, socket)
 	if err != nil {
@@ -33,7 +45,7 @@ func startTest(t *testing.T) (*Server, string) {
 	}
 	done := make(chan struct{})
 	go func() { _ = s.Run(); close(done) }()
-	t.Cleanup(func() { s.Close(); <-done; os.RemoveAll(directory) })
+	t.Cleanup(func() { s.Close(); <-done })
 	return s, socket
 }
 func connectTest(t *testing.T, socket string) *testClient {

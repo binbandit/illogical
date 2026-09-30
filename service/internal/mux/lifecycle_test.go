@@ -45,13 +45,60 @@ func TestMoveAndSwapRejectNonBlockTargetsAtomically(t *testing.T) {
 	c.request(t, Request{Method: "block.swap", Block: first.Block, Target: second.Block})
 	state = c.request(t, Request{Method: "state"}).State
 	root := state.Sessions[0].Windows[0].Root
-	if root.Axis != "vertical" || root.First.Block != first.Block || root.Second.Block != second.Block || len(state.Sessions[1].Windows) != 0 {
+	if root.Axis != "vertical" || root.First.Block != first.Block || root.Second.Block != second.Block || len(state.Sessions) != 1 {
 		t.Fatalf("valid move or same-window swap failed: %#v", root)
 	}
 	for _, info := range state.Blocks {
 		if info.Session != first.Session || info.Window != first.Window || info.ExitCode != nil {
 			t.Fatalf("block has incorrect placement or exited after movement: %#v", info)
 		}
+	}
+}
+
+func TestSessionClosesWithItsLastTab(t *testing.T) {
+	for _, how := range []string{"block.kill", "window.kill", "child-exit", "block.move"} {
+		t.Run(how, func(t *testing.T) {
+			_, socket := startTest(t)
+			c := connectTest(t, socket)
+			keep := c.request(t, Request{Method: "session.new", Label: "keep", Command: []string{"/bin/cat"}, KeepOpen: true})
+			command := []string{"/bin/cat"}
+			if how == "child-exit" {
+				command = []string{"/bin/sh", "-c", "stty -echo; printf ready; read line"}
+			}
+			doomed := c.request(t, Request{Method: "session.new", Label: "doomed", Command: command})
+			switch how {
+			case "child-exit":
+				waitCapture(t, c, doomed.Block, "ready")
+				c.request(t, Request{Method: "block.write", Block: doomed.Block, Data: []byte("bye\n")})
+			case "block.move":
+				c.request(t, Request{Method: "block.move", Block: doomed.Block, Target: keep.Block})
+			default:
+				c.request(t, Request{Method: how, Block: doomed.Block, Window: doomed.Window})
+			}
+			deadline := time.Now().Add(3 * time.Second)
+			for {
+				state := c.request(t, Request{Method: "state"}).State
+				if len(state.Sessions) == 1 && state.Sessions[0].ID == keep.Session {
+					return
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("session without tabs was kept: %+v", state.Sessions)
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+		})
+	}
+}
+
+func TestRestoreDropsEmptySessions(t *testing.T) {
+	directory := testDirectory(t)
+	saved := `{"sessions":[{"id":"empty","name":"empty","windows":[]},{"id":"tabless","name":"tabless"}],"blocks":[]}`
+	if err := os.WriteFile(filepath.Join(directory, "workspace.json"), []byte(saved), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, socket := startTestIn(t, directory)
+	if state := connectTest(t, socket).request(t, Request{Method: "state"}).State; len(state.Sessions) != 0 {
+		t.Fatalf("restored sessions without tabs: %+v", state.Sessions)
 	}
 }
 

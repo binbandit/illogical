@@ -551,7 +551,9 @@ func (s *Server) removeBlockLocked(id string) {
 	s.broadcastEvent(event)
 }
 
+// pruneLocked drops empty windows and sessions and repairs focus references.
 func (s *Server) pruneLocked() {
+	sessions := s.sessions[:0]
 	for _, ss := range s.sessions {
 		kept := ss.Windows[:0]
 		for _, w := range ss.Windows {
@@ -579,7 +581,12 @@ func (s *Server) pruneLocked() {
 				ss.FocusedWindow = kept[0].ID
 			}
 		}
+		if len(kept) > 0 {
+			sessions = append(sessions, ss)
+		}
 	}
+	clear(s.sessions[len(sessions):])
+	s.sessions = sessions
 }
 
 func (s *Server) handle(c *client, r Request) Message {
