@@ -386,7 +386,9 @@ final class WorkspaceModel {
         if let intent, intent.host == host {
             self.intent = nil
             resolve(intent, in: state, host: host)
-        } else if host == selectedHost {
+        } else if host == selectedHost && intent == nil {
+            // While a window waits for the host it restores, other hosts'
+            // states must not choose (or create) something else to show.
             if let pendingBlock {
                 guard valid.contains(pendingBlock) else { return }
                 self.pendingBlock = nil

@@ -147,6 +147,12 @@ struct WorkspaceLifecycleTests {
         Check.eventually("A restored window with nothing left to show closes when others exist") { closed == 1 }
         orphan.close()
 
+        let waiting = connect(peer, .restore(WindowSelection(host: "remote-host", session: "x", tab: "")))
+        Check.settle()
+        Check.that(waiting.selectedSession.isEmpty && peer.requests("session.new").isEmpty,
+                   "A window restoring a remote session waits for that host instead of showing a local one")
+        waiting.close()
+
         let fresh = connect(peer, .newSession(host: "local", parentBlock: "p-a1"))
         Check.eventually("Command-N asks for a new session in the parent pane's directory") {
             peer.requests("session.new").last?.block == "p-a1"
