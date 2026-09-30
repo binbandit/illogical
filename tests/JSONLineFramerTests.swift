@@ -1,5 +1,13 @@
 import Foundation
 
+/// Fails without trapping, so a failing test never opens the crash reporter.
+nonisolated private func expect(_ condition: @autoclosure () -> Bool, _ message: @autoclosure () -> String = "",
+                    file: StaticString = #fileID, line: UInt = #line) {
+    guard !condition() else { return }
+    FileHandle.standardError.write(Data("FAIL \(file):\(line) \(message())\n".utf8))
+    exit(1)
+}
+
 @main enum JSONLineFramerTests {
     static func main() throws {
         let expected = [Data("{\"text\":\"👩🏽‍💻 café\"}".utf8), Data(repeating: 65, count: 350_000), Data("{}".utf8)]
@@ -14,7 +22,7 @@ import Foundation
                 actual += try framer.append(Data(stream[offset..<end]))
                 offset = end
             }
-            precondition(actual == expected, "Corrupted stream with chunk size \(chunkSize)")
+            expect(actual == expected, "Corrupted stream with chunk size \(chunkSize)")
         }
         var limited = JSONLineFramer(maximumMessageSize: 3)
         _ = try limited.append(Data("abc".utf8))
@@ -22,7 +30,7 @@ import Foundation
         catch JSONLineFramer.Failure.messageTooLarge { }
         var small = JSONLineFramer(maximumMessageSize: 2)
         let complete = try small.append(Data("{}\n{}\n".utf8))
-        precondition(complete == [Data("{}".utf8), Data("{}".utf8)])
+        expect(complete == [Data("{}".utf8), Data("{}".utf8)])
         print("Message framing: split UTF-8, 350 KB messages, boundary sizes, and limits passed")
     }
 }

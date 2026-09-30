@@ -50,6 +50,8 @@ printf '\nSearch, contrast, and independent pane search checks\n'
 ./scripts/test-workspace-rename.sh
 ./scripts/test-workspace-navigation.sh
 ./scripts/test-workspace-peek.sh
+./scripts/test-workspace-lifecycle.sh
+./scripts/test-workspace-window.sh
 ./scripts/test-theme-import.sh
 
 printf '\nAll checks passed.\n'

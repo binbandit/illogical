@@ -12,8 +12,7 @@ cat > .build/tests/workspace-search/Info.plist <<'PLIST'
 PLIST
 swiftc -g -swift-version 5 -default-isolation MainActor -target arm64-apple-macos15 -I illogical/Terminal \
   -import-objc-header illogical/Terminal/Bridge.h \
-  illogical/Model/Protocol.swift illogical/Model/JSONLineFramer.swift illogical/Model/InboundMailbox.swift \
-  illogical/Model/ServiceConnection.swift illogical/Model/WorkspaceModel.swift illogical/Model/TerminalSearchState.swift \
+  illogical/Model/*.swift \
   illogical/Appearance/Theme.swift illogical/Appearance/GhosttyThemeImporter.swift illogical/Appearance/SearchOverlayPlacement.swift \
   illogical/Terminal/TerminalFontOptions.swift illogical/Terminal/TerminalEngine.swift tests/WorkspaceSearchTests.swift \
   .build/tests/workspace-search/Bridge.o .build/ghostty/lib/libghostty-vt.a \

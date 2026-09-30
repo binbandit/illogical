@@ -22,8 +22,7 @@ cat > .build/resource-efficiency/Info.plist <<'PLIST'
 PLIST
 swiftc -O -swift-version 5 -default-isolation MainActor -target arm64-apple-macos15 -I illogical/Terminal \
   -import-objc-header tests/ResourceConnectionFixture.h \
-  illogical/Model/Protocol.swift illogical/Model/JSONLineFramer.swift illogical/Model/InboundMailbox.swift \
-  illogical/Model/ServiceConnection.swift illogical/Model/WorkspaceModel.swift illogical/Model/TerminalSearchState.swift \
+  illogical/Model/*.swift \
   illogical/Appearance/Theme.swift illogical/Appearance/GhosttyThemeImporter.swift \
   illogical/Terminal/TerminalFontOptions.swift illogical/Terminal/TerminalEngine.swift tests/WorkspaceResourceTests.swift \
   .build/resource-efficiency/Bridge.o .build/resource-efficiency/RetryFixture.o .build/ghostty/lib/libghostty-vt.a \

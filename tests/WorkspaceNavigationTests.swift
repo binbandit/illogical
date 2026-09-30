@@ -1,355 +1,386 @@
 import AppKit
-import Darwin
 
-nonisolated private final class NavigationPeer: @unchecked Sendable {
-    struct Request: Decodable {
-        let id: String
-        let method: String
-        let session: String?
-        let window: String?
-        let block: String?
-        let target: String?
-        let cwd: String?
-    }
-
-    let path = "/tmp/ilg-navigation-\(getpid()).sock"
-    private let lock = NSLock()
-    private var requests: [Request] = []
-    private let finished = DispatchSemaphore(value: 0)
-    var received: [Request] { lock.lock();defer { lock.unlock() };return requests }
-
-    init() {
-        let listener = path.withCString { il_resource_listen($0) }
-        precondition(listener >= 0)
-        DispatchQueue.global().async { self.serve(listener) }
-    }
-
-    func finish() async {
-        let stopped = await withCheckedContinuation { continuation in
-            DispatchQueue.global().async { continuation.resume(returning: self.finished.wait(timeout: .now() + 3) == .success) }
-        }
-        unlink(path)
-        precondition(stopped, "Closing the workspace must close its socket")
-    }
-
-    private func serve(_ listener: Int32) {
-        defer { finished.signal() }
-        let peer = accept(listener, nil, nil)
-        Darwin.close(listener)
-        guard peer >= 0 else { return }
-        defer { Darwin.close(peer) }
-        var enabled: Int32 = 1
-        setsockopt(peer, SOL_SOCKET, SO_NOSIGPIPE, &enabled, socklen_t(MemoryLayout.size(ofValue: enabled)))
-        func send(_ text: String) {
-            let data = Data((text + "\n").utf8)
-            _ = data.withUnsafeBytes { Darwin.write(peer, $0.baseAddress, $0.count) }
-        }
-        func state(zoom: String?, revision: Int) {
-            let zoomField = zoom.map { ",\"zoomed\":\"\($0)\"" } ?? ""
-            send("""
-            {"type":"state","state":{"revision":\(revision),"sessions":[{"id":"session","name":"Primary","windows":[{"id":"split-tab","name":"Split"\(zoomField),"root":{"id":"split","axis":"horizontal","ratio":0.5,"first":{"id":"left-root","block":"left"},"second":{"id":"right-root","block":"right"}}},{"id":"other-tab","name":"Other","root":{"id":"other-root","block":"other"}}]},{"id":"second-session","name":"Second","windows":[{"id":"second-tab","name":"Second","root":{"id":"second-root","block":"second"}}]}],"blocks":[{"id":"left","title":"sh","cwd":"/fixture/alpha","pid":1,"cols":80,"rows":24,"parked":false,"keepOpen":true,"command":["sh"]},{"id":"right","title":"sh","cwd":"/fixture/alpha","pid":2,"cols":80,"rows":24,"parked":false,"keepOpen":true,"command":["sh"]},{"id":"other","title":"sh","cwd":"/fixture/beta","pid":3,"cols":80,"rows":24,"parked":false,"keepOpen":true,"command":["sh"]},{"id":"second","title":"sh","cwd":"/fixture/second","pid":4,"cols":80,"rows":24,"parked":false,"keepOpen":true,"command":["sh"]}],"clients":1}}
-            """)
-        }
-        send(#"{"type":"hello","protocol":1,"engine":"ghostty-27e8b3fa85d9"}"#)
-        var revision = 1
-        var rightRemoved = false
-        var holdClose = false
-        var pendingClose: String?
-        var zoom: String? = "right"
-        state(zoom: zoom, revision: revision)
-        var framer = JSONLineFramer(maximumMessageSize: 1024 * 1024)
-        var buffer = [UInt8](repeating: 0, count: 4096)
-        while true {
-            let count = buffer.withUnsafeMutableBytes { Darwin.read(peer, $0.baseAddress, $0.count) }
-            guard count > 0, let lines = try? framer.append(Data(buffer.prefix(count))) else { return }
-            for line in lines {
-                guard let request = try? JSONDecoder().decode(Request.self, from: line) else { continue }
-                lock.lock();requests.append(request);lock.unlock()
-                if rightRemoved && request.block == "right" && ["block.resize", "block.write", "block.process", "block.attach", "block.theme", "block.claim"].contains(request.method) {
-                    send("{\"type\":\"error\",\"id\":\"\(request.id)\",\"error\":\"terminal block not found\"}")
-                    continue
-                }
-                switch request.method {
-                case "block.kill":
-                    if holdClose { pendingClose = request.id;continue }
-                    send("{\"type\":\"error\",\"id\":\"\(request.id)\",\"error\":\"Fixture close rejected\"}")
-                    continue
-                case "test.hold-close": holdClose = true
-                case "test.reject-close":
-                    send("{\"type\":\"error\",\"id\":\"\(pendingClose!)\",\"error\":\"Fixture close rejected\"}")
-                    pendingClose = nil
-                case "directory.list": continue // Tests control reply ordering and errors.
-                case "test.directory-success":
-                    send("{\"type\":\"reply\",\"id\":\"\(request.target!)\",\"path\":\"\(request.cwd!)\",\"entries\":[{\"name\":\"child\",\"path\":\"\(request.cwd!)/child\"}]}")
-                case "test.directory-error":
-                    send("{\"type\":\"reply\",\"id\":\"\(request.target!)\",\"error\":\"Permission denied\"}")
-                case "test.zoom":
-                    zoom = request.block;revision += 1;state(zoom: zoom, revision: revision)
-                case "window.zoom":
-                    zoom = zoom == request.block ? nil : request.block
-                case "test.publish-zoom":
-                    revision += 1;state(zoom: zoom, revision: revision)
-                case "test.drop-right":
-                    rightRemoved = true
-                    send(#"{"type":"event","event":"block_closed","block":"right","session":"session","window":"split-tab"}"#)
-                    if let pendingClose { send("{\"type\":\"reply\",\"id\":\"\(pendingClose)\"}") }
-                    pendingClose = nil
-                case "test.publish-removal":
-                    send(#"{"type":"state","state":{"revision":999,"sessions":[{"id":"session","name":"Primary","windows":[{"id":"split-tab","name":"Split","root":{"id":"left-root","block":"left"}}]}],"blocks":[{"id":"left","title":"sh","cwd":"/fixture/alpha","pid":1,"cols":80,"rows":24,"parked":false,"keepOpen":true,"command":["sh"]}],"clients":1}}"#)
-                default: break
-                }
-                send("{\"type\":\"reply\",\"id\":\"\(request.id)\"}")
-            }
-        }
-    }
-}
-
+// Keyboard navigation over tabs, sessions and panes (including zoom), the
+// directory picker's stale-reply handling, pane teardown and shared hosts.
 @main
 struct WorkspaceNavigationTests {
-    @MainActor
-    static func wait(_ description: String, until predicate: () -> Bool) async {
-        let deadline = ContinuousClock.now + .seconds(3)
-        while !predicate(), ContinuousClock.now < deadline { try? await Task.sleep(for: .milliseconds(5)) }
-        precondition(predicate(), description)
-    }
+    typealias F = Fixture
 
-    @MainActor
-    static func main() async {
+    static func main() {
         let domain = "dev.illogical.navigation-tests"
-        precondition(Bundle.main.bundleIdentifier == domain)
+        Check.that(Bundle.main.bundleIdentifier == domain, "The test needs its private defaults domain")
         UserDefaults.standard.removePersistentDomain(forName: domain)
         defer { UserDefaults.standard.removePersistentDomain(forName: domain) }
-        await sharedHosts()
+
+        sharedHosts()
         paneGeometry()
-        let peer = NavigationPeer()
+        zoomedNavigation()
+        directoryPicker()
+        paneTeardown()
+        print("Workspace navigation: shared hosts, split geometry, zoom-aware focus, tab/session memory, directory replies and pane teardown passed.")
+    }
+
+    /// Two sessions; the first has a split tab (left | right) and a single tab.
+    static func workspace(_ revision: Int, zoom: String? = nil, includeRight: Bool = true) -> String {
+        let split = includeRight ? F.split("split", "horizontal", F.leaf("left"), F.leaf("right")) : F.leaf("left")
+        let first = F.session("session", name: "Primary", [F.tab("split-tab", split, name: "Split", zoomed: zoom),
+                                                            F.tab("other-tab", F.leaf("other"), name: "Other")])
+        let second = F.session("second-session", name: "Second", [F.tab("second-tab", F.leaf("second"))])
+        return F.state(revision, sessions: [first, second], blocks: (includeRight ? ["left", "right"] : ["left"]) + ["other", "second"])
+    }
+
+    static func connect(_ peer: ServicePeer) -> WorkspaceModel {
         setenv("ILLOGICAL_SOCKET", peer.path, 1)
         let model = WorkspaceModel()
         model.start()
-        await wait("Fixture workspace must connect") { model.states["local"]?.revision == 1 }
-
-        func exchange(_ request: WireRequest) async {
-            var replied = false
-            model.send(request, host: "local") { _ in replied = true }
-            await wait("Fixture request must finish") { replied }
-        }
-        func directories() -> [NavigationPeer.Request] { peer.received.filter { $0.method == "directory.list" } }
-        func requestDirectory() async -> NavigationPeer.Request {
-            let before = directories().count
-            model.showDirectory()
-            await wait("Directory listing must be requested") { directories().count > before }
-            return directories().last!
-        }
-        func completeDirectory(_ request: NavigationPeer.Request, path: String) async {
-            await exchange(WireRequest(method: "test.directory-success", target: request.id, cwd: path))
-        }
-
-        precondition(model.focusedBlock == "right", "Initial selection must focus the pane the zoomed tab displays")
-        model.choose(deck: "other-tab");model.choose(deck: "split-tab")
-        model.find();model.closeBlock()
-        await exchange(WireRequest(method: "test.barrier"))
-        precondition(model.focusedBlock == "right" && model.searchFocusedBlock == "right")
-        precondition(peer.received.last { $0.method == "block.kill" }?.block == "right", "Close Pane must never target the hidden first pane")
-        model.choose(session: "second-session", host: "local");model.choose(session: "session", host: "local")
-        precondition(model.selectedDeck == "split-tab" && model.focusedBlock == "right", "Session return must preserve the zoomed pane")
-        model.selectAdjacentTab(1)
-        precondition(model.selectedDeck == "other-tab")
-        model.selectAdjacentTab(1)
-        precondition(model.selectedDeck == "split-tab" && model.focusedBlock == "right", "Next tab must wrap and restore visible zoomed focus")
-        model.selectAdjacentTab(-1)
-        precondition(model.selectedDeck == "other-tab", "Previous tab must wrap")
-        model.selectTab(0)
-        precondition(model.selectedDeck == "split-tab")
-        model.selectTab(8)
-        precondition(model.selectedDeck == "other-tab", "Command-9 must select the last tab even with fewer than nine")
-        model.selectTab(7);model.selectTab(-1)
-        precondition(model.selectedDeck == "other-tab", "Unavailable numbered tabs must do nothing")
-        model.choose(session: "second-session", host: "local")
-        model.selectAdjacentTab(1);model.selectAdjacentTab(-1);model.selectTab(8)
-        precondition(model.selectedSession == "second-session" && model.selectedDeck == "second-tab", "Tab commands must remain in their current session")
-        model.choose(deck: "split-tab", session: "session", host: "local")
-        model.focusAdjacentPane(.left);model.focusAdjacentPane(.left)
-        await exchange(WireRequest(method: "test.barrier"))
-        precondition(model.focusedBlock == "right", "Zoomed focus must remain visible until the service publishes the requested zoom")
-        var zoomRequests = peer.received.filter { $0.method == "window.zoom" }
-        precondition(zoomRequests.count == 1 && zoomRequests[0].block == "left", "Repeated movement at the pending destination's edge must not toggle zoom off")
-        await exchange(WireRequest(method: "test.publish-zoom"))
-        precondition(model.activeDeck?.zoomed == "left" && model.focusedBlock == "left")
-        model.focusAdjacentPane(.right);model.focusAdjacentPane(.left)
-        await exchange(WireRequest(method: "test.barrier"))
-        zoomRequests = peer.received.filter { $0.method == "window.zoom" }
-        precondition(zoomRequests.suffix(2).map(\.block) == ["right", "left"], "Rapid reverse navigation must follow pending intent in order")
-        await exchange(WireRequest(method: "test.publish-zoom"))
-        precondition(model.activeDeck?.zoomed == "left" && model.focusedBlock == "left")
-        model.focusAdjacentPane(.right);model.selectAdjacentTab(1)
-        await exchange(WireRequest(method: "test.barrier"))
-        await exchange(WireRequest(method: "test.publish-zoom"))
-        precondition(model.selectedDeck == "other-tab" && model.focusedBlock == "other", "A delayed zoom response must not steal focus from the new tab")
-        model.selectAdjacentTab(-1)
-        precondition(model.activeDeck?.zoomed == "right" && model.focusedBlock == "right")
-        await exchange(WireRequest(method: "test.zoom"))
-        model.focus("left");model.choose(deck: "other-tab");model.choose(deck: "split-tab")
-        precondition(model.focusedBlock == "left", "Unzoomed tabs must retain their last focused pane")
-        model.focus("right");model.choose(deck: "other-tab");model.choose(deck: "split-tab")
-        precondition(model.focusedBlock == "right", "Focus memory must update after clicking a different pane")
-        await exchange(WireRequest(method: "test.zoom", block: "left"))
-        precondition(model.focusedBlock == "left", "A zoom state update must move command focus to the visible pane")
-        await exchange(WireRequest(method: "test.zoom"))
-
-        let first = await requestDirectory()
-        await completeDirectory(first, path: "/fixture/alpha")
-        precondition(model.canOpenDirectory && model.directoryPath == "/fixture/alpha")
-        model.palette = nil;model.choose(deck: "other-tab")
-        let delayed = await requestDirectory()
-        precondition(model.directoryLoading && model.directoryPath.isEmpty && model.directories.isEmpty && !model.canOpenDirectory)
-        model.openDirectory()
-        await exchange(WireRequest(method: "test.barrier"))
-        precondition(!peer.received.contains { $0.method == "window.new" }, "Enter while loading must not create a terminal with stale cwd")
-        await completeDirectory(delayed, path: "/fixture/beta")
-        model.openDirectory()
-        await exchange(WireRequest(method: "test.barrier"))
-        let opened = peer.received.filter { $0.method == "window.new" }
-        precondition(opened.count == 1 && opened[0].session == "session" && opened[0].block == "other" && opened[0].cwd == "/fixture/beta")
-        precondition(model.palette == nil)
-
-        let stale = await requestDirectory()
-        model.palette = nil;model.choose(deck: "split-tab")
-        let current = await requestDirectory()
-        await completeDirectory(current, path: "/fixture/current")
-        await completeDirectory(stale, path: "/fixture/stale")
-        precondition(model.directoryPath == "/fixture/current" && model.canOpenDirectory, "Late replies from a previous picker must not replace current results")
-        model.loadDirectory("/fixture/denied")
-        await wait("Child directory request must be sent") { directories().last?.cwd == "/fixture/denied" }
-        await exchange(WireRequest(method: "test.directory-error", target: directories().last!.id))
-        model.openDirectory()
-        precondition(!model.directoryLoading && !model.canOpenDirectory && model.directoryPath.isEmpty && model.directoryError == "Permission denied")
-
-        let changedHost = await requestDirectory()
-        model.selectedHost = "another-host"
-        await completeDirectory(changedHost, path: "/fixture/wrong-host")
-        model.openDirectory()
-        precondition(model.palette == nil && model.directoryPath.isEmpty && !model.canOpenDirectory, "A host change must invalidate both results and actions")
-        model.choose(deck: "split-tab", session: "session", host: "local")
-        let changedFocus = await requestDirectory()
-        await completeDirectory(changedFocus, path: "/fixture/old-focus")
-        model.focus("right")
-        model.openDirectory()
-        precondition(model.palette == nil && !model.canOpenDirectory, "Changing the source pane must cancel the directory action")
-
-        let removed = await requestDirectory()
-        model.states["local"]?.sessions.removeAll { $0.id == "session" }
-        await completeDirectory(removed, path: "/fixture/removed")
-        model.openDirectory()
-        await exchange(WireRequest(method: "test.barrier"))
-        precondition(!model.canOpenDirectory && model.directoryPath.isEmpty, "Deleted source context must reject a late result")
-        precondition(peer.received.filter { $0.method == "window.new" }.count == 1)
-        // SwiftUI can retain the native view after the model removes its engine.
-        model.notice = nil
-        let removedEngine = model.engine(for: "right", host: "local")
-        let retainedEngine = model.engine(for: "left", host: "local")
-        Data("\u{1b}[?1004h".utf8).withUnsafeBytes {
-            il_terminal_feed(removedEngine.handle, $0.bindMemory(to: UInt8.self).baseAddress, $0.count)
-        }
-        removedEngine.focusChanged(true)
-        await exchange(WireRequest(method: "test.hold-close"))
-        model.closeBlock("right")
-        let preAckCount = peer.received.count
-        removedEngine.onResize?(81, 24, 8, 16)
-        removedEngine.focusChanged(false)
-        await exchange(WireRequest(method: "test.barrier"))
-        precondition(!peer.received.dropFirst(preAckCount).contains { $0.block == "right" && ["block.resize", "block.write"].contains($0.method) },
-                     "Closing panes must stop layout and focus input before the kill acknowledgment")
-        await exchange(WireRequest(method: "test.reject-close"))
-        precondition(model.notice == "Fixture close rejected", "A real close failure must remain visible")
-        model.notice = nil
-        let resumedCount = peer.received.count
-        removedEngine.onResize?(82, 24, 8, 16)
-        removedEngine.focusChanged(true)
-        await exchange(WireRequest(method: "test.barrier"))
-        let resumed = peer.received.dropFirst(resumedCount).filter { $0.block == "right" }.map(\.method)
-        precondition(resumed.contains("block.resize") && resumed.contains("block.write"), "A rejected close must restore pane input and resizing")
-        model.closeBlock("right")
-        await exchange(WireRequest(method: "test.drop-right"))
-        let requestCount = peer.received.count
-        removedEngine.onResize?(82, 25, 8, 16)
-        removedEngine.focusChanged(false)
-        await exchange(WireRequest(method: "test.barrier"))
-        await exchange(WireRequest(method: "test.publish-removal"))
-        await wait("Removed-pane state must arrive") { model.states["local"]?.revision == 999 }
-        removedEngine.onResize?(83, 26, 8, 16)
-        removedEngine.onInput?(Data("late input".utf8))
-        // SwiftUI may evaluate an outgoing TerminalPane again after its cached
-        // engine has been removed, before dismantling the old native view.
-        weak var outgoingEngine: TerminalEngine?
-        do {
-            let outgoing = model.engine(for: "right", host: "local")
-            outgoingEngine = outgoing
-            outgoing.onResize?(84, 27, 8, 16)
-            outgoing.onInput?(Data("outgoing view input".utf8))
-            outgoing.onReplayGap?()
-        }
-        model.focus("right")
-        await exchange(WireRequest(method: "test.barrier"))
-        let lateRequests = peer.received.dropFirst(requestCount).filter { $0.block == "right" }
-        precondition(lateRequests.isEmpty, "Removed native views still send stale requests: \(lateRequests.map(\.method))")
-        precondition(model.notice == nil && retainedEngine.onResize != nil && retainedEngine.onInput != nil,
-                     "Closing one pane must leave its sibling usable without a missing-terminal alert")
-        precondition(outgoingEngine == nil && model.focusedBlock == "left", "Outgoing views must not retain a deleted replica or reclaim terminal focus")
-        model.close();await peer.finish()
-        print("Workspace navigation: zoomed visible-pane commands, per-tab/session focus restoration, delayed/error/reordered directory replies and deleted contexts passed.")
-        print("Pane teardown: retained native-engine resize and focus-loss callbacks stop at block-close before coalesced state, and sibling callbacks remain connected.")
+        Check.eventually("The fixture workspace must connect") { model.states["local"] != nil && !model.focusedBlock.isEmpty }
+        return model
     }
 
-    @MainActor
+    /// Mutable fixture state shared with the peer's responder thread.
+    nonisolated final class Zoom: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: String?
+        init(_ value: String?) { self.value = value }
+        var current: String? { lock.withLock { value } }
+        func toggle(_ block: String?) { lock.withLock { value = value == block ? nil : block } }
+        func set(_ block: String?) { lock.withLock { value = block } }
+    }
+
+    static func zoomedNavigation() {
+        let zoom = Zoom("right")
+        let peer = ServicePeer(name: "navigation", state: workspace(1, zoom: "right"))
+        peer.respond { request in
+            switch request.method {
+            case "window.zoom": zoom.toggle(request.block);return nil
+            case "block.kill": return [#"{"type":"error","id":"\#(request.id)","error":"Fixture close rejected"}"#]
+            default: return nil
+            }
+        }
+        let model = connect(peer)
+        var revision = 1
+        func publishZoom() {
+            revision += 1
+            let target = revision
+            peer.publish(workspace(revision, zoom: zoom.current))
+            Check.eventually("Zoom state \(target) must arrive") { model.activeDeck?.zoomed == zoom.current }
+            Check.settle(0.02)
+        }
+
+        Check.that(model.focusedBlock == "right", "Launch must focus the pane the zoomed tab shows")
+        model.choose(deck: "other-tab")
+        model.choose(deck: "split-tab")
+        model.find()
+        model.closeFocusedPane()
+        Check.eventually("Close Pane must target the visible zoomed pane") { peer.requests("block.kill").last?.block == "right" }
+        Check.eventually("A rejected close must stay visible") { model.notice?.message == "Fixture close rejected" }
+        Check.that(model.focusedBlock == "right" && model.searchFocusedBlock == "right", "A rejected close keeps focus and search")
+
+        model.choose(session: "second-session", host: "local")
+        model.choose(session: "session", host: "local")
+        Check.that(model.selectedDeck == "split-tab" && model.focusedBlock == "right", "Returning to a session restores its zoomed pane")
+        model.selectAdjacentTab(1)
+        Check.that(model.selectedDeck == "other-tab", "Next tab")
+        model.selectAdjacentTab(1)
+        Check.that(model.selectedDeck == "split-tab" && model.focusedBlock == "right", "Next tab wraps and restores the zoomed pane")
+        model.selectAdjacentTab(-1)
+        Check.that(model.selectedDeck == "other-tab", "Previous tab wraps")
+        model.selectTab(0)
+        Check.that(model.selectedDeck == "split-tab", "Command-1")
+        model.selectTab(8)
+        Check.that(model.selectedDeck == "other-tab", "Command-9 selects the last tab even with fewer than nine")
+        model.selectTab(7)
+        model.selectTab(-1)
+        Check.that(model.selectedDeck == "other-tab", "Missing numbered tabs do nothing")
+        model.choose(session: "second-session", host: "local")
+        model.selectAdjacentTab(1)
+        model.selectAdjacentTab(-1)
+        model.selectTab(8)
+        Check.that(model.selectedSession == "second-session" && model.selectedDeck == "second-tab", "Tab commands stay in their session")
+
+        model.choose(deck: "split-tab", session: "session", host: "local")
+        model.focusAdjacentPane(.left)
+        model.focusAdjacentPane(.left)
+        Check.eventually("A zoomed move asks the service to move the zoom") { peer.requests("window.zoom").count == 1 }
+        Check.settle()
+        Check.that(model.focusedBlock == "right", "Focus stays on the visible pane until the service moves the zoom")
+        Check.that(peer.requests("window.zoom").map(\.block) == ["left"], "Repeating the move at the edge must not toggle zoom off")
+        publishZoom()
+        Check.that(model.focusedBlock == "left", "The published zoom moves focus")
+
+        model.focusAdjacentPane(.right)
+        model.focusAdjacentPane(.left)
+        Check.eventually("Rapid reverse moves follow the pending target in order") {
+            peer.requests("window.zoom").suffix(2).map(\.block) == ["right", "left"]
+        }
+        publishZoom()
+        Check.that(model.activeDeck?.zoomed == "left" && model.focusedBlock == "left", "Reverse moves land back on the left pane")
+
+        model.focusAdjacentPane(.right)
+        model.selectAdjacentTab(1)
+        Check.eventually("The zoom request reaches the service") { peer.requests("window.zoom").count == 4 }
+        revision += 1
+        peer.publish(workspace(revision, zoom: zoom.current))
+        Check.eventually("State arrives") { model.states["local"]?.sessions.first?.windows.first?.zoomed == zoom.current }
+        Check.that(model.selectedDeck == "other-tab" && model.focusedBlock == "other", "A late zoom reply must not steal focus from the new tab")
+        model.selectAdjacentTab(-1)
+        Check.that(model.focusedBlock == "right", "The tab shows its zoomed pane again")
+
+        zoom.set(nil)
+        publishZoom()
+        model.focus("left")
+        model.choose(deck: "other-tab")
+        model.choose(deck: "split-tab")
+        Check.that(model.focusedBlock == "left", "Unzoomed tabs remember their focused pane")
+        model.focus("right")
+        model.choose(deck: "other-tab")
+        model.choose(deck: "split-tab")
+        Check.that(model.focusedBlock == "right", "Pane memory follows the latest focus")
+        zoom.set("left")
+        publishZoom()
+        Check.that(model.focusedBlock == "left", "A zoom published by another client moves focus to the visible pane")
+        model.close()
+    }
+
+    static func directoryPicker() {
+        let peer = ServicePeer(name: "directory", state: workspace(1))
+        // Listing replies are sent by the test to control their order.
+        peer.respond { $0.method == "directory.list" ? [] : nil }
+        let model = connect(peer)
+        model.choose(deck: "split-tab", session: "session", host: "local")
+        func request() -> ServicePeer.Request {
+            let before = peer.requests("directory.list").count
+            model.showDirectory()
+            Check.eventually("A listing must be requested") { peer.requests("directory.list").count > before }
+            return peer.requests("directory.list").last!
+        }
+        func reply(_ request: ServicePeer.Request, path: String) {
+            peer.send(#"{"type":"reply","id":"\#(request.id)","path":"\#(path)","entries":[{"name":"child","path":"\#(path)/child"}]}"#)
+        }
+        func settle() {
+            let marker = WireRequest(method: "test.barrier")
+            var done = false
+            model.send(marker, host: "local") { _ in done = true }
+            Check.eventually("The connection must drain") { done }
+        }
+
+        let first = request()
+        reply(first, path: "/fixture/alpha")
+        Check.eventually("A listing fills the picker") { model.canOpenDirectory && model.directoryPath == "/fixture/alpha" }
+
+        model.palette = nil
+        model.choose(deck: "other-tab")
+        let delayed = request()
+        Check.that(model.directoryLoading && model.directoryPath.isEmpty && !model.canOpenDirectory, "A new listing starts empty")
+        model.openDirectory()
+        settle()
+        Check.that(peer.requests("window.new").isEmpty, "Return while loading must not open a tab in a stale directory")
+        reply(delayed, path: "/fixture/beta")
+        Check.eventually("The listing arrives") { model.canOpenDirectory }
+        model.openDirectory()
+        Check.eventually("Opening creates a tab in the listed directory") { peer.requests("window.new").count == 1 }
+        let opened = peer.requests("window.new")[0]
+        Check.that(opened.session == "session" && opened.block == "other" && opened.cwd == "/fixture/beta" && model.palette == nil,
+                   "The new tab inherits the listed directory and the picker closes")
+
+        let stale = request()
+        model.palette = nil
+        model.choose(deck: "split-tab")
+        let current = request()
+        reply(current, path: "/fixture/current")
+        reply(stale, path: "/fixture/stale")
+        settle()
+        Check.that(model.directoryPath == "/fixture/current" && model.canOpenDirectory, "A late reply from an earlier picker is ignored")
+
+        model.loadDirectory("/fixture/denied")
+        Check.eventually("A child listing is requested") { peer.requests("directory.list").last?.cwd == "/fixture/denied" }
+        peer.send(#"{"type":"reply","id":"\#(peer.requests("directory.list").last!.id)","error":"Permission denied"}"#)
+        Check.eventually("A listing error is shown") { model.directoryError == "Permission denied" }
+        model.openDirectory()
+        Check.that(!model.canOpenDirectory && model.directoryPath.isEmpty, "An errored listing cannot be opened")
+
+        let hostChange = request()
+        model.selectedHost = "another-host"
+        reply(hostChange, path: "/fixture/wrong-host")
+        settle()
+        model.openDirectory()
+        Check.that(model.palette == nil && !model.canOpenDirectory, "Changing host invalidates the picker")
+
+        model.choose(deck: "split-tab", session: "session", host: "local")
+        let focusChange = request()
+        reply(focusChange, path: "/fixture/old-focus")
+        Check.eventually("The listing arrives") { model.canOpenDirectory }
+        model.focus(model.focusedBlock == "left" ? "right" : "left")
+        model.openDirectory()
+        Check.that(model.palette == nil && !model.canOpenDirectory, "Focusing another pane cancels the picker")
+
+        let removed = request()
+        model.states["local"]?.sessions.removeAll { $0.id == "session" }
+        reply(removed, path: "/fixture/removed")
+        settle()
+        model.openDirectory()
+        settle()
+        Check.that(!model.canOpenDirectory && peer.requests("window.new").count == 1, "A deleted source rejects late results")
+        model.close()
+    }
+
+    /// A closing pane's replica must stop sending input and resizes as soon
+    /// as the kill is requested, recover if the kill is rejected, and stay
+    /// silent after the service removes it.
+    static func paneTeardown() {
+        nonisolated final class Kills: @unchecked Sendable {
+            let lock = NSLock()
+            var hold = false
+            var removed = false
+        }
+        let kills = Kills()
+        let peer = ServicePeer(name: "teardown", state: workspace(1))
+        peer.respond { request in
+            let (hold, removed) = kills.lock.withLock { (kills.hold, kills.removed) }
+            if removed && request.block == "right" && request.method != "block.kill" {
+                return [#"{"type":"error","id":"\#(request.id)","error":"terminal block not found"}"#]
+            }
+            if request.method == "block.kill" && hold { return [] }
+            return nil
+        }
+        let model = connect(peer)
+        model.choose(deck: "split-tab", session: "session", host: "local")
+        let right = model.engine(for: "right", host: "local")
+        let left = model.engine(for: "left", host: "local")
+        Data("\u{1b}[?1004h".utf8).withUnsafeBytes { il_terminal_feed(right.handle, $0.bindMemory(to: UInt8.self).baseAddress, $0.count) }
+        right.focusChanged(true)
+        func requests(for block: String, after count: Int) -> [String] {
+            peer.received.dropFirst(count).filter { $0.block == block }.map(\.method)
+        }
+        func drain() {
+            var done = false
+            model.send(WireRequest(method: "test.barrier"), host: "local") { _ in done = true }
+            Check.eventually("The connection must drain") { done }
+        }
+
+        kills.lock.withLock { kills.hold = true }
+        model.closePane("right")
+        Check.eventually("The kill is requested after the job check") { peer.requests("block.kill").count == 1 }
+        let heldAt = peer.received.count
+        right.onResize?(81, 24, 8, 16)
+        right.focusChanged(false)
+        drain()
+        Check.that(!requests(for: "right", after: heldAt).contains { ["block.resize", "block.write"].contains($0) },
+                   "A closing pane must stop resizing and focus reports before the kill is acknowledged")
+
+        peer.send(#"{"type":"error","id":"\#(peer.requests("block.kill")[0].id)","error":"Fixture close rejected"}"#)
+        Check.eventually("A rejected close is shown") { model.notice?.message == "Fixture close rejected" }
+        model.dismissNotice()
+        let resumedAt = peer.received.count
+        right.onResize?(82, 24, 8, 16)
+        right.focusChanged(true)
+        drain()
+        let resumed = requests(for: "right", after: resumedAt)
+        Check.that(resumed.contains("block.resize") && resumed.contains("block.write"), "A rejected close restores input and resizing")
+
+        kills.lock.withLock { kills.removed = true }
+        model.closePane("right")
+        Check.eventually("The second kill is requested") { peer.requests("block.kill").count == 2 }
+        peer.send(#"{"type":"event","event":"block_closed","block":"right","session":"session","window":"split-tab"}"#)
+        peer.send(#"{"type":"reply","id":"\#(peer.requests("block.kill")[1].id)"}"#)
+        drain()
+        let closedAt = peer.received.count
+        right.onResize?(82, 25, 8, 16)
+        right.focusChanged(false)
+        peer.publish(workspace(2, includeRight: false))
+        Check.eventually("The removal is published") { model.activeDeck?.root.blocks == ["left"] }
+        right.onResize?(83, 26, 8, 16)
+        right.onInput?(Data("late input".utf8))
+        // SwiftUI may evaluate an outgoing pane again after its replica is gone.
+        weak var outgoing: TerminalEngine?
+        do {
+            let engine = model.engine(for: "right", host: "local")
+            outgoing = engine
+            engine.onResize?(84, 27, 8, 16)
+            engine.onInput?(Data("outgoing input".utf8))
+            engine.onReplayGap?()
+        }
+        model.focus("right")
+        drain()
+        let late = requests(for: "right", after: closedAt)
+        Check.that(late.isEmpty, "A removed pane still sends \(late)")
+        Check.that(model.notice == nil && left.onResize != nil && left.onInput != nil, "The sibling stays usable without an alert")
+        Check.that(outgoing == nil && model.focusedBlock == "left", "Outgoing views keep no replica and cannot reclaim focus")
+        model.close()
+    }
+
     static func paneGeometry() {
-        let json = #"{"id":"root","axis":"horizontal","ratio":0.3,"first":{"id":"left","axis":"vertical","ratio":0.25,"first":{"id":"a","block":"a"},"second":{"id":"b","block":"b"}},"second":{"id":"right","axis":"vertical","ratio":0.6,"first":{"id":"top","axis":"horizontal","ratio":0.7,"first":{"id":"c","block":"c"},"second":{"id":"d","block":"d"}},"second":{"id":"e","block":"e"}}}"#
+        // (a / b) | ((c | d) / e), with live ratios.
+        let json = F.split("root", "horizontal", F.split("left", "vertical", F.leaf("a"), F.leaf("b"), ratio: 0.25),
+                           F.split("right", "vertical", F.split("top", "horizontal", F.leaf("c"), F.leaf("d"), ratio: 0.7), F.leaf("e"), ratio: 0.6),
+                           ratio: 0.3)
         let layout = try! JSONDecoder().decode(SplitLayout.self, from: Data(json.utf8))
         let model = WorkspaceModel()
         let tabs = (0..<11).map { Deck(id: "tab-\($0)", name: "Tab \($0)", root: layout) }
         model.states["local"] = WorkspaceState(revision: 1, sessions: [Session(id: "geometry", name: "Geometry", windows: tabs)], blocks: [], clients: 1)
         model.choose(deck: "tab-0", session: "geometry", host: "local")
         func check(_ source: String, _ direction: PaneDirection, _ expected: String) {
-            model.focus(source);model.focusAdjacentPane(direction)
-            precondition(model.focusedBlock == expected, "Directional geometry failed: \(source) \(direction) should focus \(expected), got \(model.focusedBlock)")
+            model.focus(source)
+            model.focusAdjacentPane(direction)
+            Check.that(model.focusedBlock == expected, "\(source) \(direction) should focus \(expected), got \(model.focusedBlock)")
         }
-        check("a", .left, "a");check("a", .up, "a");check("a", .down, "b");check("a", .right, "c")
-        check("b", .right, "e");check("c", .left, "b");check("c", .right, "d")
-        check("d", .down, "e");check("d", .right, "d");check("e", .up, "c");check("e", .left, "b");check("e", .down, "e")
+        check("a", .left, "a"); check("a", .up, "a"); check("a", .down, "b"); check("a", .right, "c")
+        check("b", .right, "e"); check("c", .left, "b"); check("c", .right, "d")
+        check("d", .down, "e"); check("d", .right, "d"); check("e", .up, "c"); check("e", .left, "b"); check("e", .down, "e")
+
+        model.focus("e")
+        model.cyclePane(1)
+        Check.that(model.focusedBlock == "a", "Command-] wraps to the first pane")
+        model.cyclePane(-1)
+        Check.that(model.focusedBlock == "e", "Command-[ wraps to the last pane")
+
         model.selectTab(8)
-        precondition(model.selectedDeck == "tab-10", "Command-9 must select the final tab with more than nine tabs")
+        Check.that(model.selectedDeck == "tab-10", "Command-9 selects the final tab with more than nine")
         model.selectTab(7)
-        precondition(model.selectedDeck == "tab-7")
-        let resized = try! JSONDecoder().decode(SplitLayout.self, from: Data(json.replacingOccurrences(of: "\"ratio\":0.6", with: "\"ratio\":0.9").utf8))
+        Check.that(model.selectedDeck == "tab-7", "Command-8")
+        let resized = try! JSONDecoder().decode(SplitLayout.self, from: Data(json.replacingOccurrences(of: #""ratio":0.6"#, with: #""ratio":0.9"#).utf8))
         model.states["local"]?.sessions[0].windows[7].root = resized
         check("b", .right, "c")
+
+        // Equalize gives every pane an equal share along each axis.
+        let equal = Dictionary(uniqueKeysWithValues: layout.equalizedRatios().map { ($0.split, $0.ratio) })
+        Check.that(equal["root"] == 1.0 / 3.0 && equal["left"] == 0.5 && equal["top"] == 0.5 && equal["right"] == 0.5,
+                   "Equalized ratios: \(equal)")
+        // Resizing moves the nearest divider on the requested axis by cells.
+        let sizes: [String: (Int, Int)] = ["a": (30, 10), "b": (30, 30), "c": (35, 24), "d": (15, 24), "e": (50, 16)]
+        let right = layout.resized("d", toward: .right, cells: 10) { sizes[$0] }
+        Check.that(right?.split == "top" && abs((right?.ratio ?? 0) - 0.9) < 0.0001, "Resize right moves the c|d divider: \(String(describing: right))")
+        let down = layout.resized("a", toward: .down, cells: 10) { sizes[$0] }
+        Check.that(down?.split == "left" && abs((down?.ratio ?? 0) - 0.5) < 0.0001, "Resize down moves the a/b divider: \(String(describing: down))")
+        Check.that(layout.focusTarget(afterClosing: "c", surviving: ["a", "b", "d", "e"]) == "b", "Closing picks the previous pane")
+        Check.that(layout.focusTarget(afterClosing: "a", surviving: ["b", "c", "d", "e"]) == "b", "Closing the first pane picks the next")
         model.close()
-        print("Keyboard navigation: nested split geometry, center-line alignment, live ratios, edge no-ops, session-local tab cycling and numbered/last-tab selection passed.")
     }
 
-    @MainActor
-    static func sharedHosts() async {
+    static func sharedHosts() {
+        let store = HostProfileStore.shared
         let first = WorkspaceModel(), second = WorkspaceModel()
-        first.addHost(name: "Build", address: "build.invalid", executable: "illogical")
+        store.add(name: "Build", address: "build.invalid", executable: "illogical")
         let build = first.hosts.first { $0.name == "Build" }!
-        precondition(second.hosts.contains(build), "Adding a host must synchronously reach other live windows")
-        second.addHost(name: "Production", address: "production.invalid", executable: "illogical")
-        let production = second.hosts.first { $0.name == "Production" }!
-        precondition(first.hosts == second.hosts && first.hosts.count == 3)
+        Check.that(second.hosts.contains(build), "A new host reaches every live window immediately")
+        store.add(name: "Production", address: "production.invalid", executable: "illogical")
+        Check.that(first.hosts == second.hosts && first.hosts.count == 3, "Both windows list both hosts")
+        Check.that(store.add(name: "", address: "-oProxyCommand=evil", executable: "") != nil, "Option-like addresses are rejected")
         let saved = try! JSONDecoder().decode([HostProfile].self, from: UserDefaults.standard.data(forKey: "hosts")!)
-        precondition(saved == [build, production], "A second window must not overwrite the first window's host")
-        let reopened = WorkspaceModel()
-        precondition(reopened.hosts == first.hosts)
-        second.selectedHost = build.id;second.selectedSession = "remote-session";second.selectedDeck = "remote-tab";second.focusedBlock = "remote-block"
-        first.removeHost(build)
-        precondition(!second.hosts.contains(build) && !reopened.hosts.contains(build))
-        precondition(second.selectedHost == "local" && second.selectedSession.isEmpty && second.selectedDeck.isEmpty && second.focusedBlock.isEmpty, "Removing a selected host must clear stale remote selection in every window")
-        second.addHost(name: "Staging", address: "staging.invalid", executable: "illogical")
-        precondition(!first.hosts.contains(build), "A later mutation from another window must not resurrect removed hosts")
+        Check.that(saved.map(\.name) == ["Build", "Production"], "Both hosts persist")
+        second.selectedHost = build.id
+        second.selectedSession = "remote-session"
+        second.selectedDeck = "remote-tab"
+        store.remove(build.id)
+        Check.that(!second.hosts.contains(build), "Removal reaches every window")
+        Check.that(second.selectedHost == "local" && second.selectedSession.isEmpty && second.selectedDeck.isEmpty && second.focusedBlock.isEmpty,
+                   "Removing the shown host clears that window's selection")
         weak var released: WorkspaceModel?
         do { let temporary = WorkspaceModel();released = temporary }
-        precondition(released == nil, "The shared store must not retain closed window models")
-        for host in first.hosts where !host.isLocal { first.removeHost(host) }
-        precondition(first.hosts == [.local] && second.hosts == [.local] && reopened.hosts == [.local])
-        first.close();second.close();reopened.close()
-        print("Shared hosts: two live windows retain concurrent additions/removals, persistence stays complete, selected removed hosts reset, and subscriptions do not retain models.")
+        Check.that(released == nil, "The host store must not retain closed windows")
+        for host in store.hosts where !host.isLocal { store.remove(host.id) }
+        Check.that(first.hosts == [.local] && second.hosts == [.local], "All remote hosts removed")
+        first.close()
+        second.close()
     }
 }

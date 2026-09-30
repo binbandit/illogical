@@ -1,8 +1,76 @@
 import Foundation
 
+// The JSON-lines contract with the illogical service. Field names and values
+// must stay compatible with service/internal/mux/protocol.go.
+
+/// What a service must report in its hello for this client to use it.
+nonisolated enum WireCompatibility {
+    static let protocolVersion = 1
+    /// Terminal state is exchanged as engine snapshots, so both ends must
+    /// run the same libghostty build.
+    static let engine = "ghostty-27e8b3fa85d9"
+}
+
+/// Optional service capabilities announced in hello `features`.
+nonisolated enum WireFeature {
+    static let viewport = "viewport"
+    static let clear = "clear"
+    static let windowMove = "window-move"
+}
+
+/// A service method name. Literal-constructible so tests and other layers can
+/// name methods this file does not list.
+nonisolated struct WireMethod: RawRepresentable, Hashable, Encodable, Sendable, ExpressibleByStringInterpolation {
+    let rawValue: String
+
+    init(rawValue: String) { self.rawValue = rawValue }
+    init(stringLiteral value: String) { rawValue = value }
+    init(stringInterpolation: DefaultStringInterpolation) { rawValue = String(stringInterpolation: stringInterpolation) }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
+
+    static let watch: WireMethod = "watch"
+    static let sessionNew: WireMethod = "session.new"
+    static let sessionRename: WireMethod = "session.rename"
+    static let sessionKill: WireMethod = "session.kill"
+    static let windowNew: WireMethod = "window.new"
+    static let windowRename: WireMethod = "window.rename"
+    static let windowKill: WireMethod = "window.kill"
+    static let windowZoom: WireMethod = "window.zoom"
+    static let windowMove: WireMethod = "window.move"
+    static let layoutResize: WireMethod = "layout.resize"
+    static let directoryList: WireMethod = "directory.list"
+    static let blockSplit: WireMethod = "block.split"
+    static let blockMove: WireMethod = "block.move"
+    static let blockKill: WireMethod = "block.kill"
+    static let blockAttach: WireMethod = "block.attach"
+    static let blockClaim: WireMethod = "block.claim"
+    static let blockWrite: WireMethod = "block.write"
+    static let blockResize: WireMethod = "block.resize"
+    static let blockProcess: WireMethod = "block.process"
+    static let blockEvent: WireMethod = "block.event"
+    static let blockTheme: WireMethod = "block.theme"
+    static let blockViewport: WireMethod = "block.viewport"
+    static let blockClear: WireMethod = "block.clear"
+}
+
+/// How a split arranges its two children. `horizontal` places them side by
+/// side; `vertical` stacks them.
+nonisolated enum SplitAxis: String, Codable, Sendable {
+    case horizontal, vertical
+
+    init(from decoder: Decoder) throws {
+        // An unknown future axis must not make the whole workspace undecodable.
+        self = SplitAxis(rawValue: try decoder.singleValueContainer().decode(String.self)) ?? .horizontal
+    }
+}
+
 nonisolated struct WireRequest: Encodable, Sendable {
     var id = UUID().uuidString
-    var method: String
+    var method: WireMethod
     var session: String?
     var window: String?
     var block: String?
@@ -11,7 +79,7 @@ nonisolated struct WireRequest: Encodable, Sendable {
     var label: String?
     var command: [String]?
     var cwd: String?
-    var axis: String?
+    var axis: SplitAxis?
     var ratio: Double?
     var cols: UInt16?
     var rows: UInt16?
@@ -35,6 +103,8 @@ nonisolated struct WireTheme: Codable, Sendable {
     var palette: [UInt32]?
 }
 
+/// Every message the service sends: replies (carrying the request `id`),
+/// workspace `state`, terminal stream updates and block `event`s.
 nonisolated struct WireMessage: Decodable, Sendable {
     var id: String?
     var type: String
@@ -101,41 +171,53 @@ nonisolated struct WireGraphicsPlacement: Codable, Sendable {
     var z: Int32
 }
 
-nonisolated struct WorkspaceState: Decodable, Sendable {
+nonisolated struct WorkspaceState: Decodable, Equatable, Sendable {
     var revision: UInt64
     var sessions: [Session]
     var blocks: [BlockInfo]
     var clients: Int
 }
 
-nonisolated struct Session: Decodable, Identifiable, Sendable {
+nonisolated struct Session: Decodable, Equatable, Identifiable, Sendable {
     let id: String
     var name: String
     var windows: [Deck]
+    /// The tab the service last saw focused, shared by every client.
+    var focusedWindow: String?
 }
 
-nonisolated struct Deck: Decodable, Identifiable, Sendable {
+/// A tab: a tree of terminal blocks. The service calls it a window.
+nonisolated struct Deck: Decodable, Equatable, Identifiable, Sendable {
     let id: String
     var name: String
     var root: SplitLayout
     var zoomed: String?
+    /// The pane the service last saw focused, shared by every client.
+    var focusedBlock: String?
 }
 
-nonisolated final class SplitLayout: Decodable, Identifiable, Sendable {
+/// A node of a tab's layout: either a terminal `block` or a split of two children.
+nonisolated final class SplitLayout: Decodable, Equatable, Identifiable, Sendable {
     let id: String
     let block: String?
-    let axis: String?
+    let axis: SplitAxis?
     let ratio: Double?
     let first: SplitLayout?
     let second: SplitLayout?
 
+    /// Terminal blocks in reading order: left to right, top to bottom.
     var blocks: [String] {
         if let block { return [block] }
         return (first?.blocks ?? []) + (second?.blocks ?? [])
     }
+
+    static func == (lhs: SplitLayout, rhs: SplitLayout) -> Bool {
+        lhs === rhs || (lhs.id == rhs.id && lhs.block == rhs.block && lhs.axis == rhs.axis && lhs.ratio == rhs.ratio
+                        && lhs.first == rhs.first && lhs.second == rhs.second)
+    }
 }
 
-nonisolated struct BlockInfo: Decodable, Identifiable, Sendable {
+nonisolated struct BlockInfo: Decodable, Equatable, Identifiable, Sendable {
     let id: String
     var title: String
     var cwd: String
@@ -147,22 +229,8 @@ nonisolated struct BlockInfo: Decodable, Identifiable, Sendable {
     var command: [String]
     var keepOpen: Bool
     var owner: String?
-
-    var displayTitle: String {
-        if !title.isEmpty && !["zsh", "bash", "fish", "sh"].contains(title) { return title }
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let location = cwd == home ? "~" : (cwd as NSString).lastPathComponent
-        return "\(location) - \(title.isEmpty ? "shell" : title)"
-    }
-
-    var icon: String {
-        let text = title.lowercased()
-        if text.contains("vim") || text.contains("emacs") { return "curlybraces" }
-        if text.contains("claude") || text.contains("codex") { return "sparkle" }
-        if text.contains("top") { return "chart.bar.xaxis" }
-        if text.contains("git") { return "point.3.connected.trianglepath.dotted" }
-        return "terminal"
-    }
+    /// A name given with `illogical block rename`, preferred over the title.
+    var label: String?
 }
 
 nonisolated struct DirectoryEntry: Decodable, Identifiable, Sendable {
@@ -171,7 +239,7 @@ nonisolated struct DirectoryEntry: Decodable, Identifiable, Sendable {
     let path: String
 }
 
-nonisolated struct ChildProcess: Decodable, Sendable {
+nonisolated struct ChildProcess: Decodable, Equatable, Sendable {
     let pid: Int
     let foregroundPID: Int
     let user: String
@@ -183,7 +251,7 @@ nonisolated struct ChildProcess: Decodable, Sendable {
     var foreground: ProcessIdentity?
 }
 
-nonisolated struct ProcessIdentity: Decodable, Sendable {
+nonisolated struct ProcessIdentity: Decodable, Equatable, Sendable {
     let pid: Int
     let uid: UInt32
     var user: String?
@@ -196,6 +264,6 @@ nonisolated struct HostProfile: Codable, Identifiable, Equatable, Sendable {
     var name: String
     var address: String
     var executable: String
-    var isLocal: Bool { id == "local" }
+    var isLocal: Bool { id == Self.local.id }
     static let local = HostProfile(id: "local", name: "This Mac", address: "", executable: "")
 }

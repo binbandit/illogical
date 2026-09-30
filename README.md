@@ -44,23 +44,35 @@ The service keeps sessions, tabs, recursive split layouts, shell processes, and 
 
 The native client supports horizontal and vertical navigation, pane movement and resizing, zoom, session and command pickers, a remote directory picker, independent floating searches in each pane, live tab previews, session overview, paired light/dark themes, and Ghostty theme import. Rendering includes Nerd Font fallback, colour emoji, exact block graphics, selection, links, terminal mouse reporting, and bounded static Kitty images. Copy-on-selection and synchronized scrolling are optional. Public previews establish the reference, but this is an independent implementation and exact feature and visual parity remains under validation.
 
-Rename a session from the pencil beside its name in the session picker (Command-K), or choose **Workspace > Rename Session**. Renaming a different session leaves your current terminal selected; names are saved with the workspace.
+Each window shows one session, and a session appears in at most one window: choosing a session that another window shows brings that window forward. Quitting and closing windows only detach; every window comes back on the next launch. Closing a pane, tab or session ends its processes and asks first when a program other than the shell is running. When a session's last terminal closes, its windows close.
 
-Useful shortcuts:
+Rename the current tab with Shift-Command-I and the current session with Option-Shift-Command-I, or use the pencil beside a session in the session picker (Command-K). In the picker, Command-Delete closes the highlighted session.
+
+The shortcuts follow Ghostty's defaults, with Superlogical's where it differs. Menus, the command palette and this table share one command list (`illogical/WorkspaceCommands.swift`).
 
 | Action | Shortcut |
 | --- | --- |
-| New session / tab / window | Command-N / Command-T / Shift-Command-N |
-| Previous / next tab | Shift-Command-[ / Shift-Command-] or Control-Shift-Tab / Control-Tab |
+| New window / session / tab | Command-N / Shift-Command-N / Command-T |
+| Close pane / tab / window / all windows | Command-W / Option-Command-W / Shift-Command-W / Option-Shift-Command-W |
+| Show next / previous tab | Shift-Command-] / Shift-Command-[ or Control-Tab / Control-Shift-Tab |
 | Select tab / last tab | Command-1 through Command-8 / Command-9 |
-| Focus split in a direction | Option-Command-arrow key |
+| Move tab left / right | Option-Shift-Command-[ / Option-Shift-Command-] |
 | Split right / down | Command-D / Shift-Command-D |
-| Switch session / commands | Command-K / Shift-Command-P |
-| Find / choose directory | Command-F / Shift-Command-G |
-| Overview / tab previews | Shift-Command-O / Shift-Command-Space |
-| Vertical navigation | Control-Command-V |
+| Select next / previous pane | Command-] / Command-[ |
+| Select pane in a direction | Option-Command-arrow key |
+| Resize pane / equalize panes | Control-Command-arrow key / Control-Command-= |
 | Zoom pane | Shift-Command-Return |
-| Close focused pane | Command-W or Shift-Command-W |
+| Switch session / command palette | Command-K / Shift-Command-P (press again to close) |
+| Find / next / previous | Command-F / Command-G / Shift-Command-G while a search is open |
+| Go to directory | Shift-Command-G |
+| Clear screen and scrollback | Option-Command-K |
+| Bigger / smaller / actual size text | Command-= or Command-+ / Command-- / Command-0 |
+| Scroll to top / bottom | Command-Home / Command-End |
+| Show all tabs / session overview | Shift-Command-\\ / Shift-Command-O |
+| Vertical tabs | Shift-Command-S |
+| Rename tab / session | Shift-Command-I / Option-Shift-Command-I |
+| Full screen | Command-Return or Control-Command-F |
+| Settings | Command-, |
 
 Drag down with three fingers to reveal tab previews, or continue farther to open the session overview. Small and sideways movements leave the workspace in place. Press Escape or click the close control to return; clicking the visible terminal also dismisses tab previews. Terminal input pauses while previews or the overview are open.
 

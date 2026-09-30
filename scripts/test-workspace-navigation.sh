@@ -14,10 +14,9 @@ cat > .build/tests/workspace-navigation/Info.plist <<'PLIST'
 PLIST
 swiftc -g -swift-version 5 -default-isolation MainActor -target arm64-apple-macos15 -I illogical/Terminal \
   -import-objc-header tests/ResourceConnectionFixture.h \
-  illogical/Model/Protocol.swift illogical/Model/JSONLineFramer.swift illogical/Model/InboundMailbox.swift \
-  illogical/Model/ServiceConnection.swift illogical/Model/WorkspaceModel.swift illogical/Model/TerminalSearchState.swift \
+  illogical/Model/*.swift \
   illogical/Appearance/Theme.swift illogical/Appearance/GhosttyThemeImporter.swift \
-  illogical/Terminal/TerminalFontOptions.swift illogical/Terminal/TerminalEngine.swift tests/WorkspaceNavigationTests.swift \
+  illogical/Terminal/TerminalFontOptions.swift illogical/Terminal/TerminalEngine.swift tests/ConnectionFixturePeer.swift tests/WorkspaceNavigationTests.swift \
   .build/tests/workspace-navigation/Bridge.o .build/tests/workspace-navigation/Fixture.o .build/ghostty/lib/libghostty-vt.a \
   -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker .build/tests/workspace-navigation/Info.plist \
   -o .build/tests/workspace-navigation/workspace-navigation-tests
