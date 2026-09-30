@@ -1,6 +1,6 @@
 # illogical
 
-A native macOS terminal multiplexer built from the public Superlogical/Rex previews. The app uses SwiftUI and AppKit for its interface, Metal and Core Text for rendering, pinned Ghostty terminal state and input APIs, and a Go service that owns the terminal processes.
+A native macOS terminal multiplexer modelled on the public Superlogical previews. The app uses SwiftUI and AppKit for its interface, Metal and Core Text for rendering, the pinned Ghostty terminal library for terminal state and input encoding, and a Go service that owns the terminal processes.
 
 ## Download
 
@@ -42,7 +42,7 @@ Optional `ILLOGICAL_APP_DIR` and `ILLOGICAL_BIN_DIR` environment variables selec
 
 The service keeps sessions, tabs, recursive split layouts, shell processes, and terminal state alive when the app quits. Closing a terminal explicitly terminates that terminal. Restarting the service currently restores the saved layout with new shells; it does not preserve processes or their scrollback across a service restart.
 
-The native client supports horizontal and vertical navigation, pane movement and resizing, zoom, session and command pickers, a remote directory picker, independent floating searches in each pane, live tab previews, session overview, paired light/dark themes, and Ghostty theme import. Rendering includes Nerd Font fallback, colour emoji, exact block graphics, selection, links, terminal mouse reporting, and bounded static Kitty images. Copy-on-selection and synchronized scrolling are optional. Public previews establish the reference, but this is an independent implementation and exact feature and visual parity remains under validation.
+The client supports horizontal and vertical tabs, nested splits, pane zoom and resizing, session and command pickers, a host-side directory picker, a floating search in each pane, tab previews and a session overview, paired light/dark themes, and Ghostty theme import. Rendering includes Nerd Font fallback, colour emoji, exact block graphics, ligatures, selection, links, mouse reporting and static Kitty images.
 
 Each window shows one session, and a session appears in at most one window: choosing a session that another window shows brings that window forward. Quitting and closing windows only detach; every window comes back on the next launch. Closing a pane, tab or session ends its processes and asks first when a program other than the shell is running. When a session's last terminal closes, its windows close.
 
@@ -94,22 +94,22 @@ illogical help
 
 Remote hosts use an existing SSH identity and known-host entry. SSH bootstraps short-lived mutually authenticated QUIC credentials, with SSH transport as a fallback. The remote host must have the same `illogical` service installed. Optional embedded Tailscale registration and service discovery support explicit user/tag admission. Linux builds can use a same-user PAM login helper; the repository includes a pinned Nix package and NixOS module. Actual loopback OpenSSH fallback, Linux PAM, and Nix-built service checks pass. External-host and live-tailnet acceptance remain outstanding. See [remote setup and limits](docs/remote-deployment.md).
 
-## Validation and fidelity
+## Terminal
 
-The [feature parity audit](docs/feature-parity.md) is the current acceptance ledger.
-It records verified behavior, missing features, and reproduced defects against
-the videos and developer replies. Full Superlogical feature parity is not achieved.
+Terminals behave like Ghostty with its default macOS key bindings: Command-Left/Right/Backspace edit the line, Option-Left/Right move by word, Command-Up/Down jump between shell prompts, and unbound Command chords never reach the shell. At launch the app reads `keybind` entries and `macos-option-as-alt` from your Ghostty configuration, so bindings such as `shift+enter=text:\x1b\r` keep working. Pasting multi-line text into a program without bracketed paste asks first.
+
+The default font is the bundled JetBrains Mono at 13 points. Settings can import Ghostty's font family, size, features, variations, thickening, cell height and cursor style, and its themes.
+
+## Development
 
 ```sh
-./scripts/test.sh
+just test
 ```
 
-Input tests use real pseudo-terminals to check interruption, suspension, EOF and Ghostty key encoding. Service tests cover persistent processes, streamed snapshots and history, layout operations, parking, input backpressure, remote authentication, and reconnects. The rendering suite exercises the actual Metal shader and font rasterizer. See [rendering behaviour and limits](docs/rendering.md) for the verified cases. Appearance settings can import Ghostty's font family, size, OpenType features, variable axes and thickening settings.
+`scripts/test.sh` runs everything: Go race tests for the service and CLI with real pseudo-terminals, the terminal bridge in C, keyboard and mouse input through real AppKit events, Metal rendering read back pixel by pixel, and the workspace model against a scripted service. See [rendering](docs/rendering.md), [graphics compatibility](docs/graphics-compatibility.md) and [the graphics service](docs/graphics-service.md) for renderer details, [remote deployment](docs/remote-deployment.md) for SSH, Tailscale, PAM and NixOS, and [releases](docs/releases.md) for packaging.
 
-The client currently uses the public `libghostty-vt` state API with our own renderer. This is not the complete Ghostty application renderer. Static Kitty image support has [explicit compatibility and memory limits](docs/graphics-compatibility.md); image animation, Unicode virtual placements, and the entire Ghostty configuration surface are not reproduced. The daemon and client both parse terminal output to support authoritative persistent state and independent client views, so zero overhead relative to a standalone terminal cannot be assumed.
+The client and service each parse terminal output, the service authoritatively and the client for its own view, so every window scrolls, selects and searches independently of the service.
 
-See [performance validation](docs/performance.md) and [resource measurements](docs/resource-efficiency.md) for measured startup, DOOM Fire, idle wakeups, memory bounds, and redraw scheduling. A matched Ghostty baseline is still required before claiming performance parity.
-
-See [the research](research/superlogical/README.md) for the source videos, narration notes, visual references, and acceptance plan. Theme values and some gesture thresholds were inferred from recordings, not recovered from private source code.
+[The research](research/superlogical/README.md) collects the Superlogical videos, developer replies and the measured visual spec this app follows. Theme values and gesture thresholds are inferred from recordings, not recovered from private source code.
 
 Third-party components and their bundled license texts are listed in [the dependency notices](THIRD_PARTY_NOTICES.md).
