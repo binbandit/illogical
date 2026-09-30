@@ -251,7 +251,8 @@ extension MetalTerminalRenderer {
             "\(e)32m❯\(e)0m vim \(e)6 q"
         ]
         for scale: CGFloat in [1, 2] {
-            let frame = renderOffscreen("\(e)?25h" + lines.joined(separator: "\r\n"), columns: 72, rows: UInt16(lines.count), scale: scale,
+            // Ghostty enables grapheme clustering (mode 2027) by default.
+            let frame = renderOffscreen("\(e)?25h\(e)?2027h" + lines.joined(separator: "\r\n"), columns: 72, rows: UInt16(lines.count), scale: scale,
                                         bounds: CGRect(x: 0, y: 0, width: 640, height: 340)) {
                 $0.fontName = fontName; $0.fontSize = 14; $0.focused = true; $0.fontOptions = ownerOptions
             }
