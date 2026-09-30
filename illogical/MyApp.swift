@@ -1,7 +1,12 @@
 import SwiftUI
 
 @main struct IllogicalApp: App {
-    init() { LaunchMetrics.mark("appInit") }
+    init() {
+        LaunchMetrics.mark("appInit")
+        // Sessions and tabs are the app's own; hide the system tab bar and
+        // its Window menu items.
+        NSWindow.allowsAutomaticWindowTabbing = false
+    }
     var body: some Scene {
         WindowGroup("illogical", id: "workspace") {
             ContentView()
