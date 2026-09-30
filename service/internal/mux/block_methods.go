@@ -2,6 +2,9 @@ package mux
 
 import (
 	"errors"
+	"fmt"
+
+	vt "go.mitchellh.com/libghostty"
 )
 
 // Request handlers for one terminal. blockMethod calls them with b.mu held.
@@ -97,6 +100,63 @@ func (b *Block) handleEvent(_ *client, r Request) (Message, error) {
 	}
 	b.event(Message{Event: r.Label, Text: string(r.Data)})
 	return Message{}, nil
+}
+
+// handleClear implements Ghostty's clear_screen (Cmd+K). It is expressed as
+// ordinary VT output so replicas replay exactly what the service applied.
+func (b *Block) handleClear(*client, Request) (Message, error) {
+	if err := b.wake(); err != nil {
+		return Message{}, err
+	}
+	sequence, redraw, err := clearSequence(b.terminal)
+	if err != nil || sequence == nil {
+		return Message{}, err
+	}
+	if b.resetPending != nil {
+		return Message{}, errTerminalBusy
+	}
+	b.writeOutput(sequence)
+	if redraw {
+		return Message{}, b.enqueueInput([]byte{0x0c})
+	}
+	return Message{}, nil
+}
+
+var errTerminalBusy = errors.New("terminal is in the middle of an escape sequence; try again")
+
+// clearSequence erases the scrollback and the screen above the cursor. At a
+// shell prompt (OSC 133) it erases the whole screen instead and asks for ^L
+// so the shell redraws its prompt. The alternate screen belongs to a
+// full-screen program and is left alone (nil sequence).
+func clearSequence(t *vt.Terminal) (sequence []byte, redraw bool, err error) {
+	screen, err := t.ActiveScreen()
+	if err != nil || screen == vt.ScreenAlternate {
+		return nil, false, err
+	}
+	// Injected bytes would join an unfinished sequence from the program.
+	if ground, err := t.VTGround(); err != nil || !ground {
+		return nil, false, errors.Join(err, errTerminalBusy)
+	}
+	const eraseScrollback = "\x1b[3J"
+	if atPrompt, _ := t.CursorAtPrompt(); atPrompt {
+		// Marking the row as command output (OSC 133;C) makes ED 2 erase the
+		// prompt too rather than scrolling it into history.
+		return []byte("\x1b]133;C\x07\x1b[2J" + eraseScrollback), true, nil
+	}
+	x, err := t.CursorX()
+	if err != nil {
+		return nil, false, err
+	}
+	y, err := t.CursorY()
+	if err != nil {
+		return nil, false, err
+	}
+	sequence = []byte{}
+	if y > 0 {
+		// Scroll the cursor's row to the top, then follow it.
+		sequence = fmt.Appendf(sequence, "\x1b[%dS\x1b[1;%dH", y, x+1)
+	}
+	return append(sequence, eraseScrollback...), false, nil
 }
 
 func (b *Block) handleTheme(_ *client, r Request) (Message, error) {

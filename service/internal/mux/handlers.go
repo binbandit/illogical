@@ -62,6 +62,7 @@ func init() {
 		"block.resize":    blockMethod((*Block).handleResize),
 		"block.size":      blockMethod((*Block).handleSize),
 		"block.rename":    blockMethod((*Block).handleRename),
+		"block.clear":     blockMethod((*Block).handleClear),
 		"block.capture":   blockMethod((*Block).handleCapture),
 		"block.format":    blockMethod((*Block).handleCapture),
 		"block.process":   blockMethod((*Block).handleProcess),
