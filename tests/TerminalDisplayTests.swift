@@ -26,6 +26,9 @@ struct TerminalDisplayTests {
         let surface = NativeTerminalView(engine: engine)
         defer { surface.detach() }
         guard let renderer = surface.renderer else { fatalError("Display tests require the production Metal renderer and shaders") }
+        // A face whose rounded point-size cell differs between 1x and 2x, so
+        // cell observers must receive new metrics on a backing change.
+        renderer.fontName = "SF Mono"
         renderer.fontSize = 12
         let window = DisplayTestWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 400),
                                        styleMask: .borderless, backing: .buffered, defer: false)

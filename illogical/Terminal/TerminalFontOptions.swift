@@ -144,12 +144,14 @@ struct TerminalFontOptions: Codable, Hashable {
 /// The app's default terminal look, in one place. Saved preferences and
 /// imported Ghostty settings override it, and every value applies live.
 extension TerminalFontOptions {
-    static let defaultFontName = "SF Mono"
+    /// JetBrains Mono at 13pt, the default of Ghostty and Superlogical. The
+    /// app bundles all four faces (see `TerminalBundledFonts`).
+    static let defaultFontName = "JetBrainsMono Nerd Font"
     static let defaultFontSize: CGFloat = 13
     static let defaults: TerminalFontOptions = {
         var options = TerminalFontOptions()
-        // Line height: 20% roomier than the font's own line spacing.
-        options.cellHeight = .percent(0.2)
+        // Line height: the font's own, computed like Ghostty.
+        options.cellHeight = .none
         // Glyph weight: `variations["wght"]` on variable fonts (the system
         // monospace face included), or `thicken` for any font.
         options.variations = [:]

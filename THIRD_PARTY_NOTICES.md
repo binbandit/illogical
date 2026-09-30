@@ -19,7 +19,7 @@ illogical includes the components below. Their original license and attribution 
 | [Wuffs](https://github.com/google/wuffs) | 7411f488fe2e2c205c3d3b3d28638b7356522930 | MIT / Apache 2.0 | [Wuffs-LICENSE.txt](illogical/Resources/Licenses/Wuffs-LICENSE.txt) |
 | [Nerd Fonts patching and symbols](https://github.com/ryanoasis/nerd-fonts) | font from pinned Ghostty revision | SIL OFL 1.1; MIT for tooling | [Nerd-Fonts-LICENSE.md](illogical/Resources/Licenses/Nerd-Fonts-LICENSE.md) |
 
-The bundled JetBrains Mono Nerd Font is copied unchanged from the pinned Ghostty source. Its [SIL OFL text](illogical/Resources/Fonts/JetBrainsMono-OFL.txt) and [font notice](illogical/Resources/Fonts/NOTICE.txt) remain alongside the font.
+The bundled JetBrains Mono Nerd Font faces (regular, bold, italic and bold italic) are copied unchanged from the pinned Ghostty source. Its [SIL OFL text](illogical/Resources/Fonts/JetBrainsMono-OFL.txt) and [font notice](illogical/Resources/Fonts/NOTICE.txt) remain alongside the font.
 
 Ghostty supplies uucode, simdutf, Highway, and Wuffs to the statically linked terminal library. Go module revisions are recorded in `service/go.mod` and `service/go.sum`. The native application uses macOS system frameworks, including AppKit, SwiftUI, CoreText, and Metal.
 

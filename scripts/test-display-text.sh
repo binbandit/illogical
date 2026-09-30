@@ -3,6 +3,7 @@ set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$ROOT"
 mkdir -p .build/display-text
+cp illogical/Resources/Fonts/JetBrainsMonoNerdFont-*.ttf .build/display-text/
 RENDER_SANITIZER_FLAGS=
 if [ "${ILLOGICAL_RENDER_SANITIZE:-0}" = 1 ]; then
   RENDER_SANITIZER_FLAGS=-fsanitize=address

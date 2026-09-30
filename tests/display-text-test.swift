@@ -274,7 +274,7 @@ extension MetalTerminalRenderer {
     /// inspection. ILLOGICAL_GALLERY_FONT selects a locally installed font.
     @MainActor
     static func renderGallery() {
-        let fontName = ProcessInfo.processInfo.environment["ILLOGICAL_GALLERY_FONT"] ?? "SF Mono"
+        let fontName = ProcessInfo.processInfo.environment["ILLOGICAL_GALLERY_FONT"] ?? TerminalFontOptions.defaultFontName
         let e = "\u{1b}["
         var colors = "", gradient = ""
         for index in 0..<16 { colors += "\(e)48;5;\(index)m \(String(format: "%X", index)) " }

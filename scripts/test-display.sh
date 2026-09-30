@@ -3,6 +3,7 @@ set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$ROOT"
 mkdir -p .build/tests/display
+cp illogical/Resources/Fonts/JetBrainsMonoNerdFont-*.ttf .build/tests/display/
 cat > .build/tests/display/Fixture.h <<'HEADER'
 #include "Bridge.h"
 #include <ghostty/vt.h>

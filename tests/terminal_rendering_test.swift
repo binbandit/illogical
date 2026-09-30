@@ -17,7 +17,8 @@ struct TerminalRenderingTest {
         testRasterization(jetBrains)
         testVariableFont(root)
         testCellDrawing()
-        print("PASS: Ghostty option import, cell metrics and adjustments, thickening, synthetic bold, overhanging glyphs, variable weight, ligatures, Nerd Font fallback, marks, CJK, color emoji and aligned box drawing")
+        testBundledDefault()
+        print("PASS: bundled JetBrains Mono default with real bold/italic, Ghostty option import, cell metrics and adjustments, thickening, synthetic bold, overhanging glyphs, variable weight, ligatures, Nerd Font fallback, marks, CJK, color emoji and aligned box drawing")
     }
 
     static func testOptions() {
@@ -121,6 +122,23 @@ struct TerminalRenderingTest {
         let off = TerminalFontRasterizer(font: variable, scale: 2, options: .init(features: ["calt": 0, "liga": 0]))
         let key = TerminalFontRasterizer.Key(text: "==>", width: 3)
         precondition(on.rasterize(key)!.pixels != off.rasterize(key)!.pixels, "Code operator ligatures were not shaped")
+    }
+
+    /// The default family is the bundled JetBrains Mono, registered for this
+    /// process, and its real bold and italic faces win over synthetic styles.
+    @MainActor static func testBundledDefault() {
+        precondition(TerminalBundledFonts.register(), "Bundled JetBrains Mono faces must register")
+        guard let font = NSFont(name: TerminalFontOptions.defaultFontName, size: TerminalFontOptions.defaultFontSize) else {
+            fatalError("The default family must resolve to the bundled font")
+        }
+        let raster = TerminalFontRasterizer(font: font, scale: 2)
+        let faces = [(false, false, "JetBrainsMonoNF-Regular"), (true, false, "JetBrainsMonoNF-Bold"),
+                     (false, true, "JetBrainsMonoNF-Italic"), (true, true, "JetBrainsMonoNF-BoldItalic")]
+        for (bold, italic, name) in faces {
+            let resolved = CTFontCopyPostScriptName(raster.resolvedFont(for: "M", bold: bold, italic: italic)) as String
+            precondition(resolved == name, "bold=\(bold) italic=\(italic) resolved \(resolved), not the bundled \(name)")
+        }
+        precondition(NSFont(name: "Menlo", size: 13) != nil, "Installed families stay selectable")
     }
 
     /// Rounded corners must share the straight lines' pixel columns at 1x,

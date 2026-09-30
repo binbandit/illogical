@@ -95,6 +95,30 @@ struct TerminalCellMetrics: Hashable {
     }
 }
 
+/// JetBrains Mono Nerd Font ships in the app bundle in all four styles. It is
+/// registered for this process only, never installed into the user's fonts.
+enum TerminalBundledFonts {
+    static let family = "JetBrainsMono Nerd Font"
+
+    /// Registers the faces on first use. Returns whether any face is available.
+    @discardableResult
+    static func register() -> Bool { registered }
+
+    private static let registered: Bool = {
+        var available = false
+        for style in ["Regular", "Bold", "Italic", "BoldItalic"] {
+            guard let url = Bundle.main.url(forResource: "JetBrainsMonoNerdFont-\(style)", withExtension: "ttf") else { continue }
+            var error: Unmanaged<CFError>?
+            if CTFontManagerRegisterFontsForURL(url as CFURL, .process, &error) {
+                available = true
+            } else if let error = error?.takeRetainedValue(), CFErrorGetCode(error) == CTFontManagerError.alreadyRegistered.rawValue {
+                available = true
+            }
+        }
+        return available
+    }()
+}
+
 /// Rasterizes cell text into trimmed coverage bitmaps positioned relative to
 /// the cell origin. Font discovery is lazy: ASCII startup never enumerates fonts.
 @MainActor
@@ -150,19 +174,16 @@ final class TerminalFontRasterizer {
     private var fallbacks: [Key: CTFont] = [:]
     /// Approximately tan(15deg), matching Ghostty's synthetic italic.
     private static var italicSkew = CGAffineTransform(a: 1, b: 0, c: 0.267949, d: 1, tx: 0, ty: 0)
-    private static let bundledFallback: CGFont? = {
-        guard let url = Bundle.main.url(forResource: "JetBrainsMonoNerdFont-Regular", withExtension: "ttf"),
-              let provider = CGDataProvider(url: url as CFURL) else { return nil }
-        return CGFont(provider)
-    }()
     private lazy var nerdFont: CTFont? = {
-        // CoreText's default cascade does not reliably choose installed PUA fonts.
-        for name in ["Symbols Nerd Font Mono", "Symbols Nerd Font", "JetBrainsMono Nerd Font"] {
+        // CoreText's default cascade does not reliably choose installed PUA
+        // fonts. The bundled family always has the Nerd Font symbols.
+        TerminalBundledFonts.register()
+        for name in ["Symbols Nerd Font Mono", "Symbols Nerd Font", TerminalBundledFonts.family] {
             if let installed = NSFont(name: name, size: font.pointSize) {
                 return CTFontCreateWithName(installed.fontName as CFString, font.pointSize * scale, nil)
             }
         }
-        return Self.bundledFallback.map { CTFontCreateWithGraphicsFont($0, font.pointSize * scale, nil, nil) }
+        return nil
     }()
 
     init(font: NSFont, scale: CGFloat, options: TerminalFontOptions = .defaults) {

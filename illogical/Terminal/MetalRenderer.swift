@@ -410,6 +410,8 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
 
     var font: NSFont {
         if let fontCache { return fontCache }
+        TerminalBundledFonts.register()
+        // Unknown names, including "SF Mono", use the system monospace face.
         let base = NSFont(name: fontName, size: fontSize) ?? NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
         let resolved = TerminalFontRasterizer.configuredFont(base as CTFont, options: fontOptions) as NSFont
         fontCache = resolved

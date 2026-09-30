@@ -3,6 +3,7 @@ set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$ROOT"
 mkdir -p .build/tests/resources
+cp illogical/Resources/Fonts/JetBrainsMonoNerdFont-*.ttf .build/tests/resources/
 clang -mmacosx-version-min=15.0 -I .build/ghostty/include -I illogical/Terminal \
   -c illogical/Terminal/Bridge.c -o .build/tests/resources/Bridge.o
 xcrun -sdk macosx metal -c illogical/Terminal/Terminal.metal -o .build/tests/resources/Terminal.air
