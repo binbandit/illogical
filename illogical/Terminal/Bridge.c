@@ -295,6 +295,10 @@ ILTerminal *il_terminal_new(uint16_t columns, uint16_t rows) {
         il_terminal_free(t);
         return NULL;
     }
+    // Ghostty's default grapheme-width-method (unicode) starts terminals in
+    // mode 2027. Restored snapshots carry the service's mode instead.
+    GhosttyTerminalModeConfig graphemes = {.mode = GHOSTTY_MODE_GRAPHEME_CLUSTER, .value = true};
+    ghostty_terminal_set(t->terminal, GHOSTTY_TERMINAL_OPT_MODE, &graphemes);
     return t;
 }
 

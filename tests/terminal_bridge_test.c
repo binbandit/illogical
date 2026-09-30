@@ -35,6 +35,20 @@ static void search_and_copy(void) {
     il_terminal_free(t);
 }
 
+static void grapheme_clusters(void) {
+    ILTerminal *t = il_terminal_new(20, 2);
+    assert(t);
+    // A family emoji is one grapheme: one wide cell, like Ghostty.
+    const char *family = "\xf0\x9f\x91\xa8\xe2\x80\x8d\xf0\x9f\x91\xa9\xe2\x80\x8d\xf0\x9f\x91\xa7";
+    feed(t, family);
+    feed(t, "x");
+    ILFrame frame;
+    assert(il_terminal_frame(t, &frame));
+    assert(!strcmp(frame.cells[0].text, family) && frame.cells[0].width == 2 && frame.cells[1].width == 0);
+    assert(!strcmp(frame.cells[2].text, "x"));
+    il_terminal_free(t);
+}
+
 static void prompt_jumps(void) {
     ILTerminal *t = il_terminal_new(20, 4);
     assert(t);
@@ -94,8 +108,9 @@ static void option_as_alt(void) {
 
 int main(void) {
     search_and_copy();
+    grapheme_clusters();
     prompt_jumps();
     paste();
     option_as_alt();
-    puts("terminal bridge: search, copy, prompt jumps, paste encoding and protection, Option-as-Alt passed");
+    puts("terminal bridge: search, copy, grapheme clusters, prompt jumps, paste encoding and protection, Option-as-Alt passed");
 }
