@@ -75,7 +75,7 @@ These were deliberately kept out of the confirmed-feature list:
 | [Remote port forwarding](https://x.com/n6bbo/status/2097466477154648535) and [remote image paste](https://x.com/fuadnafiz98/status/2097428199869218956) | Requests/speculation, not inspected developer confirmations. |
 | [Handling secrets in scrollback](https://x.com/lookatcomputer/status/2095238298545398200) | No developer answer was visible. Do not infer encryption, redaction, retention policy or secure deletion. |
 
-The V14 [root post](https://x.com/mitchellh/status/2099622049325232505) does explicitly position the CLI as covering GUI operations and additional automation, including focus changes, input-device simulation, waiting, streamed events, and process JSON. This reinforces the gaps already identified in [the service audit](../../docs/audit-service.md). It does not provide stable parameter schemas, idempotency rules or replay guarantees for control operations.
+The V14 [root post](https://x.com/mitchellh/status/2099622049325232505) does explicitly position the CLI as covering GUI operations and additional automation, including focus changes, input-device simulation, waiting, streamed events, and process JSON. It does not provide stable parameter schemas, idempotency rules or replay guarantees for control operations.
 
 ## Recommended inventory changes
 

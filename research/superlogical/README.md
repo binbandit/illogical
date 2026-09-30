@@ -11,7 +11,8 @@ The strongest finding is that this is a persistent terminal system with native c
 - [Visual reference](VISUAL_REFERENCE.md): selected frames and interaction details.
 - [Caption links and timestamped narration notes](TRANSCRIPT_NOTES.md): original X caption files and feature explanations from all six narrated previews.
 - [Implementation and acceptance plan](BUILD_PLAN.md): a sequence for reproducing the demonstrated behavior.
-- [Feature parity audit](../../docs/feature-parity.md): implementation evidence, executed checks, and known missing or partial behavior. This is the current acceptance status.
+- [Visual spec](VISUAL_SPEC.md): measured chrome, typography, colours and badges, in points, from full-resolution frames. The app follows it.
+- [October update](UPDATES-2026-10.md): posts and developer replies after 20 September, including the newest chrome, configurable look confirmations and the Deck icon system.
 - [Source index](SOURCES.md): all 16 collected video posts, additional primary sources, and research method.
 - [Developer reply research](REPLIES-architecture.md): architecture, persistence and remote details; companion notes cover [interface behavior](REPLIES-interface.md) and [copy and migration](REPLIES-copy-migration.md).
 - [Machine-readable source manifest](sources.json): dates, durations, dimensions, hashes, and frame paths.
