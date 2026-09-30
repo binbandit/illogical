@@ -109,9 +109,108 @@ struct TerminalSurfaceInputTests {
         precondition(attachedWakeups > beforeReattach, "Reattaching a cached Metal view must wake without new terminal input")
         metal.onDisplayEnvironmentChange = nil
         window.contentView = nil
+        focusClicks()
+        pasteProtection()
         print("Native input surface: menu key releases, matching Kitty releases, and IME Unicode commit passed.")
         print("Tab navigation input: Control-Tab yields to menus; Control-Option-Tab and Control-C still reach the focused terminal.")
         print("Terminal focus: delayed mount, first Control-C, inactive panes, palette cancellation, and active editor preservation passed.")
         print("Metal surface lifecycle: child attachment, deferred first-frame wake, hide/reveal, and reattachment passed.")
+    }
+
+    @MainActor
+    private final class KeyWindow: NSWindow {
+        override var isKeyWindow: Bool { true }
+    }
+
+    /// Like Ghostty, a click that moves focus between panes (or activates the
+    /// window) is not also a click in the program.
+    @MainActor
+    static func focusClicks() {
+        let window = KeyWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 400), styleMask: .borderless, backing: .buffered, defer: false)
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
+        window.contentView = container
+        let engine = TerminalEngine(blockID: "focus-click", theme: .merinoDark)
+        var output = Data()
+        engine.onInput = { output.append($0) }
+        Data("\u{1b}[?1000h\u{1b}[?1006h".utf8).withUnsafeBytes { il_terminal_feed(engine.handle, $0.bindMemory(to: UInt8.self).baseAddress, $0.count) }
+        let left = NativeTerminalView(engine: TerminalEngine(blockID: "focus-click-left", theme: .merinoDark))
+        let right = NativeTerminalView(engine: engine)
+        defer { left.detach(); right.detach(); window.contentView = nil }
+        left.frame = NSRect(x: 0, y: 0, width: 300, height: 400)
+        right.frame = NSRect(x: 300, y: 0, width: 300, height: 400)
+        container.addSubview(left)
+        container.addSubview(right)
+        var focusRequests = 0
+        right.onFocus = { focusRequests += 1 }
+        func click() -> Data {
+            output.removeAll()
+            let location = right.convert(NSPoint(x: 30, y: 30), to: nil)
+            for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                let event = NSEvent.mouseEvent(with: type, location: location, modifierFlags: [], timestamp: 1, windowNumber: window.windowNumber,
+                                               context: nil, eventNumber: 1, clickCount: 1, pressure: 1)!
+                if type == .leftMouseDown { right.mouseDown(with: event) } else { right.mouseUp(with: event) }
+            }
+            return output
+        }
+        window.makeFirstResponder(left)
+        precondition(click().isEmpty && window.firstResponder === right && focusRequests == 1,
+                     "Clicking an unfocused pane focuses it without a mouse report")
+        let report = click()
+        precondition(report.starts(with: Data("\u{1b}[<0;".utf8)) && report.last == UInt8(ascii: "m"),
+                     "The next click reaches the program: \(report as NSData)")
+        _ = right.acceptsFirstMouse(for: nil)
+        precondition(click().isEmpty, "The click that activates an inactive window only focuses")
+        precondition(!click().isEmpty, "Later clicks in the activated window reach the program")
+
+        right.setPaneFocus(false, unfocusedOpacity: 0.85)
+        precondition(right.isDimmed, "Unfocused panes dim when the workspace asks")
+        right.setPaneFocus(true, unfocusedOpacity: 0.85)
+        precondition(!right.isDimmed, "The focused pane is never dimmed")
+
+        engine.optionAsAlt = .both
+        output.removeAll()
+        right.keyDown(with: NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .option, timestamp: 2, windowNumber: window.windowNumber,
+                                             context: nil, characters: "∫", charactersIgnoringModifiers: "b", isARepeat: false, keyCode: 11)!)
+        precondition(output == Data("\u{1b}b".utf8), "Option as Alt reaches the program through the input system: \(output as NSData)")
+        print("Focus clicks: pane and window activation clicks only focus; unfocused dimming and Option as Alt through the view passed.")
+    }
+
+    /// Ghostty's clipboard-paste-protection and file pasting.
+    @MainActor
+    static func pasteProtection() {
+        let engine = TerminalEngine(blockID: "paste-protection", theme: .merinoDark)
+        var output = Data()
+        engine.onInput = { output.append($0) }
+        let view = NativeTerminalView(engine: engine)
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name("illogical-paste-tests-" + UUID().uuidString))
+        defer { pasteboard.releaseGlobally(); view.detach() }
+        view.pasteboard = pasteboard
+        var questions: [String] = []
+        var approve = false
+        view.confirmPaste = { text, answer in
+            questions.append(text)
+            answer(approve)
+        }
+        func paste(_ text: String) -> Data {
+            output.removeAll()
+            pasteboard.clearContents()
+            pasteboard.setString(text, forType: .string)
+            view.paste(nil)
+            return output
+        }
+        precondition(paste("echo safe") == Data("echo safe".utf8) && questions.isEmpty, "Single-line pastes need no confirmation")
+        precondition(paste("ls\nrm -rf build\n").isEmpty && questions.count == 1, "A declined multi-line paste sends nothing")
+        approve = true
+        precondition(paste("ls\nrm -rf build\n") == Data("ls\rrm -rf build\r".utf8), "An approved paste sends newlines as returns")
+        Data("\u{1b}[?2004h".utf8).withUnsafeBytes { il_terminal_feed(engine.handle, $0.bindMemory(to: UInt8.self).baseAddress, $0.count) }
+        questions.removeAll()
+        precondition(paste("a\nb") == Data("\u{1b}[200~a\nb\u{1b}[201~".utf8) && questions.isEmpty, "Bracketed pastes are trusted")
+        output.removeAll()
+        pasteboard.clearContents()
+        pasteboard.writeObjects([NSURL(fileURLWithPath: "/tmp/two words.txt"), NSURL(fileURLWithPath: "/tmp/it's")])
+        view.paste(nil)
+        precondition(output == Data("\u{1b}[200~/tmp/two\\ words.txt /tmp/it\\'s\u{1b}[201~".utf8),
+                     "Files paste as escaped paths: \(String(decoding: output, as: UTF8.self))")
+        print("Paste protection: confirmation for unbracketed newlines, trusted bracketed paste, and escaped file paths passed.")
     }
 }

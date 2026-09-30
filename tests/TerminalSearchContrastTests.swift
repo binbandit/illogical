@@ -43,7 +43,7 @@ struct TerminalSearchContrastTests {
         precondition(spans == [TerminalSearchSpan(row: 0, startColumn: 0, endColumn: 19), TerminalSearchSpan(row: 1, startColumn: 0, endColumn: 2)])
         wrapped.scrollTo(1); _ = wrapped.frame()
         precondition(spans == [TerminalSearchSpan(row: 0, startColumn: 0, endColumn: 2)])
-        wrapped.scrollBottom(); _ = wrapped.frame()
+        wrapped.scrollToBottom(); _ = wrapped.frame()
         precondition(spans.isEmpty)
         print("Search engine: immediate clear, reconnect query restoration, independent pane queries, remount publication, and clipped/wrapped selected geometry passed.")
 

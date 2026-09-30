@@ -23,12 +23,10 @@ struct TerminalFocusMouseTests {
         engine.focusChanged(true); engine.focusChanged(true); engine.focusChanged(false); engine.focusChanged(false)
         precondition(bytes == Data("\u{1b}[I\u{1b}[O".utf8))
         bytes.removeAll()
-        let event = NSEvent.mouseEvent(with: .mouseMoved, location: .zero, modifierFlags: [], timestamp: 1, windowNumber: 0,
-                                      context: nil, eventNumber: 0, clickCount: 0, pressure: 0)!
-        precondition(engine.mouse(event, action: 2, button: 0, point: NSPoint(x: 12, y: 10), cell: NSSize(width: 10, height: 20)))
+        precondition(engine.mouse(.motion, button: .unknown, modifiers: [], at: CGPoint(x: 12, y: 10), cell: CGSize(width: 10, height: 20)))
         precondition(bytes == Data("\u{1b}[<35;2;1M".utf8))
         bytes.removeAll()
-        precondition(engine.mouse(event, action: 2, button: 0, point: NSPoint(x: 13, y: 11), cell: NSSize(width: 10, height: 20)))
+        precondition(engine.mouse(.motion, button: .unknown, modifiers: [], at: CGPoint(x: 13, y: 11), cell: CGSize(width: 10, height: 20)))
         precondition(bytes.isEmpty, "A suppressed same-cell event remains consumed without sending bytes")
         precondition(notifications == 0 && engine.frame()!.scrollOffset == offset, "Focus and hover reports must not jump scrollback or redraw the terminal")
         precondition(viewports.isEmpty, "Protocol replies cannot broadcast a viewport jump")
