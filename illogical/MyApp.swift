@@ -21,6 +21,7 @@ struct IllogicalApp: App {
     }
 }
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillFinishLaunching(_ notification: Notification) {
         // Sessions and tabs are the app's own; hide the system tab bar and
@@ -30,5 +31,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // window back on launch, as Ghostty does with window-save-state.
         UserDefaults.standard.register(defaults: ["NSQuitAlwaysKeepsWindows": true])
         KeyAliasMonitor.install()
+        applyGhosttyKeyboardConfiguration()
+    }
+
+    /// Terminal keys follow the user's Ghostty configuration: its `keybind`
+    /// entries (such as `shift+enter=text:\x1b\r`) and `macos-option-as-alt`.
+    private func applyGhosttyKeyboardConfiguration() {
+        let entries = (try? GhosttyThemeImporter.configurationEntries()) ?? []
+        TerminalKeybindings.shared = .ghostty(configuration: entries)
+        let optionAsAlt = entries.last { $0.0 == "macos-option-as-alt" }?.1.trimmingCharacters(in: .whitespaces)
+        TerminalEngine.defaultOptionAsAlt = switch optionAsAlt {
+        case "true": .both
+        case "left": .left
+        case "right": .right
+        default: .disabled
+        }
     }
 }

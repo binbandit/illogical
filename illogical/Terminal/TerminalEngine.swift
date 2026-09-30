@@ -341,7 +341,9 @@ final class TerminalEngine {
     var rows: UInt16 = 30
     var requestedSize: (UInt16, UInt16)?
     /// Which Option keys act as Alt, like Ghostty's `macos-option-as-alt`.
-    var optionAsAlt: ILOptionAsAlt = .disabled
+    var optionAsAlt = TerminalEngine.defaultOptionAsAlt
+    /// What new terminals use; the app sets it from the user's configuration.
+    static var defaultOptionAsAlt: ILOptionAsAlt = .disabled
     var keybindings = TerminalKeybindings.shared
     /// The cursor shown until a program picks one; nil keeps Ghostty's block.
     private(set) var defaultCursor: (style: ILCursorStyle, blinks: Bool)?
