@@ -198,12 +198,58 @@ extension MetalTerminalRenderer {
     }
 }
 
+extension MetalTerminalRenderer {
+    /// CPU cost of building and encoding one full frame of dense, colored text.
+    @MainActor
+    static func measureFullFrameEncoding() {
+        let device = device!
+        let columns = 200, rows = 60
+        let engine = TerminalEngine(blockID: "frame-cost", theme: .merinoDark)
+        engine.resizeFromServer(columns: UInt16(columns), rows: UInt16(rows))
+        var text = ""
+        var seed: UInt64 = 0x5eed
+        for row in 0..<rows {
+            for column in 0..<columns {
+                seed = seed &* 6_364_136_223_846_793_005 &+ 1
+                if column % 12 == 0 { text += "\u{1b}[3\(Int(seed >> 60) % 8)m" }
+                let scalar = UInt8(33 + Int((seed >> 33) % 94))
+                text += String(UnicodeScalar(scalar))
+            }
+            if row < rows - 1 { text += "\r\n" }
+        }
+        Data(text.utf8).withUnsafeBytes { il_terminal_feed(engine.handle, $0.bindMemory(to: UInt8.self).baseAddress, $0.count) }
+        let bounds = CGRect(x: 0, y: 0, width: 1_800, height: 1_300)
+        let view = MTKView(frame: bounds, device: device)
+        let renderer = MetalTerminalRenderer(engine: engine, view: view)!
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: 3_600, height: 2_600, mipmapped: false)
+        descriptor.usage = [.renderTarget, .shaderRead];descriptor.storageMode = .private
+        let output = device.makeTexture(descriptor: descriptor)!
+        func frame() {
+            renderer.presentation.invalidate()
+            var slot = renderer.presentation.beginAcquisition()
+            while slot == nil {
+                RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.001))
+                slot = renderer.presentation.beginAcquisition()
+            }
+            renderer.presentation.acquired()
+            renderer.render(in: view, texture: output, drawable: nil, slot: slot!)
+        }
+        for _ in 0..<5 { frame() }
+        let count = 200
+        let seconds = ResourceRenderBenchmark.elapsed { for _ in 0..<count { frame() } }
+        let fence = renderer.queue.makeCommandBuffer()!;fence.commit();fence.waitUntilCompleted()
+        renderer.detach()
+        print(String(format: "Full-frame encode, %dx%d dense colored text: %.3f ms/frame", columns, rows, seconds * 1_000 / Double(count)))
+    }
+}
+
 @main
 struct ResourceRenderBenchmark {
     @MainActor
     static func main() {
         guard let device = MTLCreateSystemDefaultDevice() else { fatalError("Metal device unavailable") }
         MetalTerminalRenderer.verifyFullRenderThemeTransitions()
+        if ProcessInfo.processInfo.environment["ILLOGICAL_FRAME_BENCHMARK"] == "1" { MetalTerminalRenderer.measureFullFrameEncoding(); return }
         if ProcessInfo.processInfo.environment["ILLOGICAL_RENDER_SANITIZE"] == "1" { return }
         let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
         let cell = NSSize(width: 8, height: 19)
