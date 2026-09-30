@@ -119,7 +119,8 @@ struct TerminalSurfaceInputTests {
 
     @MainActor
     private final class KeyWindow: NSWindow {
-        override var isKeyWindow: Bool { true }
+        var key = true
+        override var isKeyWindow: Bool { key }
     }
 
     /// Like Ghostty, a click that moves focus between panes (or activates the
@@ -162,8 +163,16 @@ struct TerminalSurfaceInputTests {
         precondition(click().isEmpty, "The click that activates an inactive window only focuses")
         precondition(!click().isEmpty, "Later clicks in the activated window reach the program")
 
+        precondition(right.renderer?.focused == true && left.renderer?.focused == false, "Only the focused pane draws a solid cursor")
+        window.key = false
+        NotificationCenter.default.post(name: NSWindow.didResignKeyNotification, object: window)
+        precondition(right.renderer?.focused == false, "A background window shows a hollow cursor")
+        window.key = true
+        NotificationCenter.default.post(name: NSWindow.didBecomeKeyNotification, object: window)
+        precondition(right.renderer?.focused == true, "The cursor turns solid again when the window is key")
+
         right.setPaneFocus(false, unfocusedOpacity: 0.85)
-        precondition(right.isDimmed, "Unfocused panes dim when the workspace asks")
+        precondition(right.isDimmed && right.renderer?.focused == false, "Unfocused panes dim when the workspace asks")
         right.setPaneFocus(true, unfocusedOpacity: 0.85)
         precondition(!right.isDimmed, "The focused pane is never dimmed")
 
@@ -172,7 +181,7 @@ struct TerminalSurfaceInputTests {
         right.keyDown(with: NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .option, timestamp: 2, windowNumber: window.windowNumber,
                                              context: nil, characters: "∫", charactersIgnoringModifiers: "b", isARepeat: false, keyCode: 11)!)
         precondition(output == Data("\u{1b}b".utf8), "Option as Alt reaches the program through the input system: \(output as NSData)")
-        print("Focus clicks: pane and window activation clicks only focus; unfocused dimming and Option as Alt through the view passed.")
+        print("Focus clicks: pane and window activation clicks only focus; hollow background cursors, unfocused dimming and Option as Alt through the view passed.")
     }
 
     /// Ghostty's clipboard-paste-protection and file pasting.

@@ -138,7 +138,7 @@ struct TerminalSurface: NSViewRepresentable {
         let renderer = view.renderer
         let layoutChanged = view.interactive != interactive || renderer?.fontSize != fontSize
             || renderer?.fontName != fontName || renderer?.fontOptions != fontOptions
-        let drawingChanged = layoutChanged || renderer?.focused != focused || renderer?.contrastCorrection != contrast
+        let drawingChanged = layoutChanged || renderer?.contrastCorrection != contrast
         view.interactive = interactive
         view.onFocus = onFocus
         view.onPeek = onPeek
@@ -157,7 +157,6 @@ struct TerminalSurface: NSViewRepresentable {
                                 blinks: fontOptions.cursorBlink)
         renderer?.interactive = interactive
         renderer?.contrastCorrection = contrast
-        renderer?.focused = focused
         view.setPaneFocus(focused, unfocusedOpacity: unfocusedOpacity)
         view.updateCursorBlink()
         view.wantsKeyboardFocus = interactive && focused
@@ -213,6 +212,7 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
                 cancelPeekGesture()
             }
             if interactive != oldValue {
+                updateRendererFocus()
                 updateCursorBlink()
                 updateTrackingAreas()
                 updateDimming()
@@ -245,6 +245,7 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
     /// Distance from the view edge to the first cell, wherever the renderer puts it.
     private var gridInset: CGFloat { MetalTerminalRenderer.padding }
     private var paneFocused = true
+    private var isFirstResponder = false
     private var unfocusedOpacity: CGFloat = 1
     private var dimmerColor: (background: UInt32, opacity: CGFloat)?
     private var detached = false
@@ -325,8 +326,8 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
     override var acceptsFirstResponder: Bool { interactive && peekProgress == 0 }
 
     override func becomeFirstResponder() -> Bool {
-        renderer?.focused = true
-        renderer?.requestDraw()
+        isFirstResponder = true
+        updateRendererFocus()
         DispatchQueue.main.async { [weak self] in self?.updateCursorBlink() }
         return true
     }
@@ -335,9 +336,9 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
         cancelSelectionDrag()
         pressedKeys.removeAll(keepingCapacity: true)
         suppressMouseUp = false
-        renderer?.focused = false
+        isFirstResponder = false
+        updateRendererFocus()
         updateCursorBlink()
-        renderer?.requestDraw()
         return true
     }
 
@@ -378,6 +379,7 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
             cancelPeekGesture()
         }
         observeWindow(window)
+        updateRendererFocus()
         needsLayout = true
         requestKeyboardFocus()
         renderer?.requestDraw()
@@ -424,6 +426,7 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
 
     @objc private func displayEnvironmentChanged(_ notification: Notification) {
         needsLayout = true
+        updateRendererFocus()
         if notification.name == NSWindow.didResignKeyNotification || window?.occlusionState.contains(.visible) != true {
             cancelSelectionDrag()
             cancelPeekGesture()
@@ -485,7 +488,17 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
     func setPaneFocus(_ focused: Bool, unfocusedOpacity: CGFloat) {
         paneFocused = focused
         self.unfocusedOpacity = min(1, max(0, unfocusedOpacity))
+        updateRendererFocus()
         updateDimming()
+    }
+
+    /// Like Ghostty, only the focused pane of the key window draws a solid
+    /// cursor; every other terminal shows a hollow one.
+    private func updateRendererFocus() {
+        let focused = interactive ? paneFocused && isFirstResponder && window?.isKeyWindow == true : paneFocused
+        guard let renderer, renderer.focused != focused else { return }
+        renderer.focused = focused
+        renderer.requestDraw()
     }
 
     var isDimmed: Bool { !dimmer.isHidden }
