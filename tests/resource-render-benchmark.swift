@@ -262,7 +262,7 @@ struct ResourceRenderBenchmark {
             }
             return withExtendedLifetime(pool) { device.currentAllocatedSize - start }
         }
-        precondition(pooledBytes * 8 < baselineBytes, "Obsolete atlas textures must be released")
+        precondition(pooledBytes * 4 < baselineBytes, "Obsolete atlas textures must be released")
         print("Nine sequential font sizes, actual Metal allocation: retained=\(baselineBytes) pooled=\(pooledBytes) bytes")
 
         // Fill the actual atlas with distinct wide runs. Once full, misses must

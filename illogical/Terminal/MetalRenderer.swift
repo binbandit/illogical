@@ -171,6 +171,7 @@ private final class GlyphAtlas {
     }
 
     static let dimension = 2_048
+    private static let maximumEntries = 65_536
     let device: MTLDevice
     let rasterizer: TerminalFontRasterizer
     var metrics: TerminalCellMetrics { rasterizer.metrics }
@@ -210,6 +211,8 @@ private final class GlyphAtlas {
 
     func glyph(_ key: Key) -> Entry? {
         if let cached = entries[key] { return cached }
+        // Blank entries take no texels; the key count bounds their memory.
+        if entries.count >= Self.maximumEntries { full = true }
         guard !full else { return nil }
         // An unrenderable or blank glyph is cached as empty, not retried.
         guard let bitmap = rasterizer.rasterize(key), !bitmap.isEmpty else {
