@@ -9,108 +9,109 @@ import (
 	vt "go.mitchellh.com/libghostty"
 )
 
-type KeyInput struct {
-	Name   string `json:"name"`
-	Action string `json:"action,omitempty"`
-	Mods   string `json:"mods,omitempty"`
-	Text   string `json:"text,omitempty"`
-}
-type MouseInput struct {
-	Button string `json:"button,omitempty"`
-	Action string `json:"action,omitempty"`
-	Mods   string `json:"mods,omitempty"`
-	X      uint32 `json:"x"`
-	Y      uint32 `json:"y"`
-	Pixels bool   `json:"pixels,omitempty"`
-}
+// Key and mouse requests come from the CLI and automation. They are encoded
+// against the authoritative emulator's current modes (application cursor keys,
+// kitty keyboard flags, mouse reporting) so programs receive what a real
+// keyboard or mouse would produce. Caller holds b.mu with the terminal awake.
 
 func (b *Block) encodeInput(r Request) ([]byte, error) {
 	if r.Method == "block.key" {
 		if r.Key == nil {
 			return nil, errors.New("key is missing")
 		}
-		input := *r.Key
-		name := strings.ToLower(input.Name)
-		mods, err := vt.ParseMods(strings.ToLower(input.Mods))
-		if err != nil {
-			return nil, err
-		}
-		for {
-			prefix, rest, found := strings.Cut(name, "-")
-			if !found {
-				break
-			}
-			modifier, err := vt.ParseMods(prefix)
-			if err != nil {
-				break
-			}
-			mods |= modifier
-			name = rest
-		}
-		aliases := map[string]string{"up": "arrow_up", "down": "arrow_down", "left": "arrow_left", "right": "arrow_right", "return": "enter", "esc": "escape", "pageup": "page_up", "pagedown": "page_down"}
-		if alias := aliases[name]; alias != "" {
-			name = alias
-		}
-		var codepoint rune
-		if utf8.RuneCountInString(name) == 1 {
-			codepoint, _ = utf8.DecodeRuneInString(name)
-			if codepoint >= 'a' && codepoint <= 'z' {
-				name = "key_" + name
-			} else if codepoint >= '0' && codepoint <= '9' {
-				name = "digit_" + name
-			} else {
-				names := map[rune]string{' ': "space", '-': "minus", '=': "equal", '[': "bracket_left", ']': "bracket_right", '\\': "backslash", ';': "semicolon", '\'': "quote", ',': "comma", '.': "period", '/': "slash", '`': "backquote"}
-				name = names[codepoint]
-				if name == "" {
-					name = "unidentified"
-				}
-			}
-		}
-		key, err := vt.ParseKey(name)
-		if err != nil {
-			return nil, err
-		}
-		action := vt.KeyActionPress
-		switch input.Action {
-		case "", "press":
-		case "release":
-			action = vt.KeyActionRelease
-		case "repeat":
-			action = vt.KeyActionRepeat
-		default:
-			return nil, errors.New("key action must be press, release, or repeat")
-		}
-		encoder, err := vt.NewKeyEncoder()
-		if err != nil {
-			return nil, err
-		}
-		defer encoder.Close()
-		encoder.SetOptFromTerminal(b.terminal)
-		event, err := vt.NewKeyEvent()
-		if err != nil {
-			return nil, err
-		}
-		defer event.Close()
-		event.SetKey(key)
-		event.SetMods(mods)
-		event.SetAction(action)
-		if codepoint != 0 {
-			event.SetUnshiftedCodepoint(codepoint)
-			if input.Text == "" && mods&(vt.ModCtrl|vt.ModSuper) == 0 {
-				input.Text = string(codepoint)
-				if mods&vt.ModShift != 0 {
-					input.Text = strings.ToUpper(input.Text)
-					event.SetConsumedMods(vt.ModShift)
-				}
-			}
-		}
-		event.SetUTF8(input.Text)
-		return encoder.Encode(event)
+		return b.encodeKey(*r.Key)
 	}
 	if r.Mouse == nil {
 		return nil, errors.New("mouse is missing")
 	}
-	input := r.Mouse
+	return b.encodeMouse(*r.Mouse)
+}
+
+var keyAliases = map[string]string{"up": "arrow_up", "down": "arrow_down", "left": "arrow_left", "right": "arrow_right", "return": "enter", "esc": "escape", "pageup": "page_up", "pagedown": "page_down"}
+
+var punctuationKeys = map[rune]string{' ': "space", '-': "minus", '=': "equal", '[': "bracket_left", ']': "bracket_right", '\\': "backslash", ';': "semicolon", '\'': "quote", ',': "comma", '.': "period", '/': "slash", '`': "backquote"}
+
+// encodeKey accepts names like "ctrl-c", "shift-enter", "up", "f1", or "a",
+// with further modifiers in input.Mods.
+func (b *Block) encodeKey(input KeyInput) ([]byte, error) {
+	name := strings.ToLower(input.Name)
+	mods, err := vt.ParseMods(strings.ToLower(input.Mods))
+	if err != nil {
+		return nil, err
+	}
+	for {
+		prefix, rest, found := strings.Cut(name, "-")
+		if !found {
+			break
+		}
+		modifier, err := vt.ParseMods(prefix)
+		if err != nil {
+			break
+		}
+		mods |= modifier
+		name = rest
+	}
+	if alias := keyAliases[name]; alias != "" {
+		name = alias
+	}
+	var codepoint rune
+	if utf8.RuneCountInString(name) == 1 {
+		codepoint, _ = utf8.DecodeRuneInString(name)
+		switch {
+		case codepoint >= 'a' && codepoint <= 'z':
+			name = "key_" + name
+		case codepoint >= '0' && codepoint <= '9':
+			name = "digit_" + name
+		case punctuationKeys[codepoint] != "":
+			name = punctuationKeys[codepoint]
+		default:
+			name = "unidentified"
+		}
+	}
+	key, err := vt.ParseKey(name)
+	if err != nil {
+		return nil, err
+	}
+	action := vt.KeyActionPress
+	switch input.Action {
+	case "", "press":
+	case "release":
+		action = vt.KeyActionRelease
+	case "repeat":
+		action = vt.KeyActionRepeat
+	default:
+		return nil, errors.New("key action must be press, release, or repeat")
+	}
+	encoder, err := vt.NewKeyEncoder()
+	if err != nil {
+		return nil, err
+	}
+	defer encoder.Close()
+	encoder.SetOptFromTerminal(b.terminal)
+	event, err := vt.NewKeyEvent()
+	if err != nil {
+		return nil, err
+	}
+	defer event.Close()
+	event.SetKey(key)
+	event.SetMods(mods)
+	event.SetAction(action)
+	if codepoint != 0 {
+		event.SetUnshiftedCodepoint(codepoint)
+		if input.Text == "" && mods&(vt.ModCtrl|vt.ModSuper) == 0 {
+			input.Text = string(codepoint)
+			if mods&vt.ModShift != 0 {
+				input.Text = strings.ToUpper(input.Text)
+				event.SetConsumedMods(vt.ModShift)
+			}
+		}
+	}
+	event.SetUTF8(input.Text)
+	return encoder.Encode(event)
+}
+
+// encodeMouse takes cell coordinates, or pixels when input.Pixels is set.
+func (b *Block) encodeMouse(input MouseInput) ([]byte, error) {
 	mods, err := vt.ParseMods(input.Mods)
 	if err != nil {
 		return nil, err
@@ -132,7 +133,8 @@ func (b *Block) encodeInput(r Request) ([]byte, error) {
 	defer event.Close()
 	event.SetAction(action)
 	event.SetMods(mods)
-	if input.Button != "" && input.Button != "none" {
+	pressed := input.Button != "" && input.Button != "none"
+	if pressed {
 		button, err := vt.ParseMouseButton(input.Button)
 		if err != nil {
 			return nil, err
@@ -141,16 +143,16 @@ func (b *Block) encodeInput(r Request) ([]byte, error) {
 	} else {
 		event.ClearButton()
 	}
-	cw, ch := max(uint32(1), b.cellWidth), max(uint32(1), b.cellHeight)
+	cols, rows := uint32(b.info.Cols), uint32(b.info.Rows)
+	cw, ch := max(1, b.cellWidth), max(1, b.cellHeight)
 	x, y := input.X, input.Y
 	if !input.Pixels {
-		if x >= uint32(b.info.Cols) || y >= uint32(b.info.Rows) {
-			return nil, fmt.Errorf("mouse cell outside %dx%d terminal", b.info.Cols, b.info.Rows)
+		if x >= cols || y >= rows {
+			return nil, fmt.Errorf("mouse cell outside %dx%d terminal", cols, rows)
 		}
-		x = x*cw + cw/2
-		y = y*ch + ch/2
+		x, y = x*cw+cw/2, y*ch+ch/2
 	}
-	if x >= uint32(b.info.Cols)*cw || y >= uint32(b.info.Rows)*ch {
+	if x >= cols*cw || y >= rows*ch {
 		return nil, errors.New("mouse position outside terminal")
 	}
 	event.SetPosition(vt.MousePosition{X: float32(x), Y: float32(y)})
@@ -160,8 +162,8 @@ func (b *Block) encodeInput(r Request) ([]byte, error) {
 	}
 	defer encoder.Close()
 	encoder.SetOptFromTerminal(b.terminal)
-	encoder.SetOptSize(vt.MouseEncoderSize{ScreenWidth: uint32(b.info.Cols) * cw, ScreenHeight: uint32(b.info.Rows) * ch, CellWidth: cw, CellHeight: ch})
+	encoder.SetOptSize(vt.MouseEncoderSize{ScreenWidth: cols * cw, ScreenHeight: rows * ch, CellWidth: cw, CellHeight: ch})
 	encoder.SetOptTrackLastCell(false)
-	encoder.SetOptAnyButtonPressed(input.Button != "" && input.Button != "none")
+	encoder.SetOptAnyButtonPressed(pressed)
 	return encoder.Encode(event)
 }

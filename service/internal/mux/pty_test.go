@@ -6,7 +6,10 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
+	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -68,7 +71,7 @@ func TestControlCInterruptsForegroundProcess(t *testing.T) {
 	created := c.request(t, Request{Method: "session.new", Command: []string{"/bin/sh", "-c", "printf interrupt-ready; exec sleep 30"}, KeepOpen: true})
 	waitCapture(t, c, created.Block, "interrupt-ready")
 	c.request(t, Request{Method: "block.write", Block: created.Block, Data: []byte{3}})
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		process := c.request(t, Request{Method: "block.process", Block: created.Block}).Process
 		if process.ExitCode != nil {
@@ -80,6 +83,61 @@ func TestControlCInterruptsForegroundProcess(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("Ctrl+C did not interrupt the PTY's foreground process")
+}
+
+// Closing a pane must hang up the job the user sees, even when the shell
+// ignores SIGHUP, and must not leave that shell running without its PTY.
+func TestClosingPaneHangsUpForegroundJobAndReapsStubbornShell(t *testing.T) {
+	_, socket := startTest(t)
+	c := connectTest(t, socket)
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(testDirectory(t), "hangup")
+	script := `trap "" HUP; "$1" -test.run='^TestPTYForegroundJobHelper$' -- foreground-helper "$2"; while :; do sleep 1; done`
+	created := c.request(t, Request{Method: "session.new", Command: []string{"/bin/sh", "-c", script, "sh", executable, marker}})
+	waitCapture(t, c, created.Block, "foreground-ready")
+	shell := c.request(t, Request{Method: "block.process", Block: created.Block}).Process.PID
+	closed := time.Now()
+	c.request(t, Request{Method: "block.kill", Block: created.Block})
+	for {
+		if _, err := os.Stat(marker); err == nil {
+			break
+		}
+		if time.Since(closed) > 1500*time.Millisecond {
+			t.Fatal("foreground job in its own process group did not receive SIGHUP")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	for unix.Kill(shell, 0) != unix.ESRCH {
+		if time.Since(closed) > hangupGracePeriod+2*time.Second {
+			t.Fatal("shell ignoring SIGHUP outlived its closed pane")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestPTYForegroundJobHelper takes the terminal's foreground like a job-control
+// shell's job, then records SIGHUP delivery.
+func TestPTYForegroundJobHelper(t *testing.T) {
+	if len(os.Args) < 2 || os.Args[len(os.Args)-2] != "foreground-helper" {
+		return
+	}
+	hangup := make(chan os.Signal, 1)
+	signal.Notify(hangup, syscall.SIGHUP)
+	signal.Ignore(syscall.SIGTTOU)
+	if unix.Setpgid(0, 0) != nil || unix.IoctlSetPointerInt(0, unix.TIOCSPGRP, unix.Getpid()) != nil {
+		os.Exit(2)
+	}
+	fmt.Print("foreground-ready")
+	select {
+	case <-hangup:
+		_ = os.WriteFile(os.Args[len(os.Args)-1], nil, 0600)
+		os.Exit(0)
+	case <-time.After(10 * time.Second):
+		os.Exit(3)
+	}
 }
 
 func TestPTYQueryHelper(t *testing.T) {

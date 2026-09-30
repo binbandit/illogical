@@ -3,8 +3,68 @@ package main
 import (
 	"errors"
 	"fmt"
+
 	"illogical/internal/mux"
 )
+
+// childExitStatus makes `illogical wait` exit with the child's status.
+type childExitStatus int
+
+func (status childExitStatus) Error() string {
+	return fmt.Sprintf("process exited with status %d", status)
+}
+
+func exitResult(code *int) error {
+	if code == nil {
+		return errors.New("service did not report the process exit status")
+	}
+	if *code == 0 {
+		return nil
+	}
+	return childExitStatus(*code)
+}
+
+// waitForBlock waits for one block's child to exit. Subscribing and reading
+// the state happen atomically on the service, and events arriving before the
+// reply are kept, so even a child that exits immediately is observed.
+func waitForBlock(c *connection, block string) error {
+	if block == "" {
+		return errors.New("wait requires --block or ILLOGICAL_BLOCK")
+	}
+	message, err := c.request(mux.Request{Method: "watch"})
+	if err != nil {
+		return err
+	}
+	found := false
+	if message.State != nil {
+		for _, info := range message.State.Blocks {
+			if info.ID == block {
+				if info.ExitCode != nil {
+					return exitResult(info.ExitCode)
+				}
+				found = true
+				break
+			}
+		}
+	}
+	if !found {
+		for _, event := range c.pending {
+			if event.Event == "child_exited" && event.Block == block {
+				return exitResult(event.ExitCode)
+			}
+		}
+		return errors.New("block not found")
+	}
+	for {
+		event, err := c.next()
+		if err != nil {
+			return fmt.Errorf("connection closed before the process exited: %w", err)
+		}
+		if event.Event == "child_exited" && event.Block == block {
+			return exitResult(event.ExitCode)
+		}
+	}
+}
 
 func layoutBlocks(n *mux.Layout) []string {
 	if n == nil {

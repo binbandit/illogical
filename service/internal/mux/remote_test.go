@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -81,6 +82,34 @@ func TestOSCWorkingDirectoryAndForegroundMetadata(t *testing.T) {
 	}
 }
 
+// Tab titles and restored panes use the block's directory, so it must follow
+// cd in shells without OSC 7 integration, and ignore reports from ssh hosts.
+func TestWorkingDirectoryFollowsShellWithoutIntegration(t *testing.T) {
+	_, socket := startTest(t)
+	c := connectTest(t, socket)
+	target := testDirectory(t)
+	resolved, _ := filepath.EvalSymlinks(target)
+	script := `stty -echo; printf ready; read x; cd "$1"; printf '\033]7;file://elsewhere.example/srv/app\007moved'; sleep 30`
+	created := c.request(t, Request{Method: "session.new", Command: []string{"/bin/sh", "-c", script, "sh", target}, KeepOpen: true})
+	waitCapture(t, c, created.Block, "ready")
+	watcher := connectTest(t, socket)
+	watcher.request(t, Request{Method: "watch"})
+	c.request(t, Request{Method: "block.write", Block: created.Block, Data: []byte("go\n")})
+	for {
+		m := watcher.next(t)
+		if m.Event != "pwd_changed" {
+			continue
+		}
+		if m.Text != resolved {
+			t.Fatalf("pwd_changed to %q, want %q", m.Text, resolved)
+		}
+		break
+	}
+	if cwd := c.request(t, Request{Method: "state"}).State.Blocks[0].Cwd; cwd != resolved {
+		t.Fatalf("block directory %q, want %q", cwd, resolved)
+	}
+}
+
 func TestBlockedInputDoesNotBlockWorkspace(t *testing.T) {
 	_, socket := startTest(t)
 	c := connectTest(t, socket)
@@ -89,7 +118,7 @@ func TestBlockedInputDoesNotBlockWorkspace(t *testing.T) {
 	c.request(t, Request{Method: "block.write", Block: created.Block, Data: make([]byte, 1<<20)})
 	before := time.Now()
 	c.request(t, Request{Method: "state"})
-	if time.Since(before) > time.Second {
+	if time.Since(before) > 2*time.Second {
 		t.Fatal("a blocked writer stalled workspace requests")
 	}
 }

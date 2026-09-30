@@ -261,22 +261,7 @@ func (b *Block) refreshGraphics() {
 		// Geometry-only updates do not enter this path.
 		b.replay.append(Message{Type: "graphics", Graphics: &delta})
 		b.replay.clear()
-		b.server.clientsMu.RLock()
-		viewers := make([]*client, 0, len(b.server.clients))
-		for _, c := range b.server.clients {
-			viewers = append(viewers, c)
-		}
-		b.server.clientsMu.RUnlock()
-		for _, c := range viewers {
-			c.mu.Lock()
-			attached := c.subscriptions[b.info.ID] != ""
-			c.mu.Unlock()
-			if attached {
-				if err := b.server.attach(c, b, "graphics"); err != nil {
-					c.send(Message{Type: "error", Block: b.info.ID, Error: "image snapshot: " + err.Error()})
-				}
-			}
-		}
+		b.resyncViewers("graphics")
 		return
 	}
 	b.publishMutation(Message{Type: "graphics", Graphics: &delta})

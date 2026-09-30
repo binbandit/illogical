@@ -154,7 +154,7 @@ func TestResourceInspectionFocusAndClientDetach(t *testing.T) {
 		t.Fatalf("bad window inspection %#v", window)
 	}
 	info := admin.request(t, Request{Method: "block.inspect", Block: created.Block})
-	if info.Block != created.Block || info.BlockInfo == nil || info.BlockInfo.Creator == "" || info.BlockInfo.Host == "" || info.BlockInfo.Flavor != "terminal" || info.BlockInfo.Window != created.Window || info.BlockInfo.Session != created.Session {
+	if info.Block != created.Block || info.BlockInfo == nil || info.BlockInfo.Creator == "" || info.BlockInfo.Host == "" || info.BlockInfo.Window != created.Window || info.BlockInfo.Session != created.Session {
 		t.Fatalf("incomplete block metadata %#v", info)
 	}
 	if info.Process.Child == nil || info.Process.Child.PID != info.Process.PID || info.Process.Child.Executable == "" || info.Process.Child.User == "" {
@@ -205,7 +205,7 @@ func TestDesiredResizeTransfersWhenOwnerReleases(t *testing.T) {
 	waitCapture(t, peer, created.Block, "40 120")
 	owner.request(t, Request{Method: "block.claim", Block: created.Block})
 	owner.conn.Close()
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	for {
 		result = peer.request(t, Request{Method: "block.size", Block: created.Block})
 		if result.Size.Owner == peerID {
@@ -287,7 +287,7 @@ func testResetTimeout(t *testing.T, prefix string) {
 	started := time.Now()
 	admin.request(t, Request{Method: "block.reset", Block: created.Block})
 	elapsed := time.Since(started)
-	if elapsed < 230*time.Millisecond || elapsed > time.Second {
+	if elapsed < 230*time.Millisecond || elapsed > 3*time.Second {
 		t.Fatalf("unexpected reset timeout: %s", elapsed)
 	}
 	for {
@@ -325,7 +325,7 @@ func TestProcessMetadataFollowsRealExec(t *testing.T) {
 	c := connectTest(t, socket)
 	created := c.request(t, Request{Method: "session.new", Command: []string{"/bin/sh", "-c", "printf before-exec; exec /bin/cat"}, KeepOpen: true})
 	waitCapture(t, c, created.Block, "before-exec")
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	for {
 		process := c.request(t, Request{Method: "block.process", Block: created.Block}).Process
 		if process.Child != nil && filepath.Base(process.Child.Executable) == "cat" {

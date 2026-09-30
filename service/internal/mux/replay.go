@@ -9,10 +9,16 @@ type replayRecord struct {
 	message Message
 	charge  int
 }
+
+// replayBuffer numbers every mutation of a terminal (output, resize, theme,
+// graphics) and retains a bounded window of them. A client that reconnects
+// with its (epoch, sequence) cursor inside the window resumes from there;
+// otherwise it gets a resync and a full snapshot. A new epoch means replica
+// state from before it cannot be continued at all.
 type replayBuffer struct {
 	epoch    string
-	sequence uint64
-	floor    uint64
+	sequence uint64 // Last assigned sequence.
+	floor    uint64 // Oldest cursor that can still resume.
 	records  []replayRecord
 	head     int
 	bytes    int
@@ -24,7 +30,9 @@ func (r *replayBuffer) clear() {
 	r.head = 0
 	r.bytes = 0
 }
+
 func (r *replayBuffer) invalidate() { r.epoch = NewID(); r.sequence = 0; r.clear() }
+
 func (r *replayBuffer) append(message Message) Message {
 	previous := r.sequence
 	r.sequence++
@@ -58,13 +66,17 @@ func (r *replayBuffer) append(message Message) Message {
 	return message
 }
 
-// Data already belongs to the immutable PTY read chunk; the bounded replay
-// window shares it with outbound queues without copying the bytes again.
+// publishMutation numbers a terminal mutation and sends it to attached
+// replicas. Its Data is never modified afterwards, so the replay window and
+// every outbound queue share it without copying. Caller holds b.mu.
 func (b *Block) publishMutation(message Message) {
 	message.Block = b.info.ID
 	message = b.replay.append(message)
-	b.server.broadcast(message, b.info.ID)
+	b.server.broadcastBlock(message, b.info.ID)
 }
+
+// replayAdjacent reports whether next directly follows previous, so the two
+// may be batched into one packet.
 func replayAdjacent(previous, next Message) bool {
 	if previous.ReplayID != next.ReplayID {
 		return false
@@ -75,8 +87,9 @@ func replayAdjacent(previous, next Message) bool {
 	return *previous.Sequence == *next.PreviousSequence
 }
 
-// Caller holds b.mu, excluding output/resize/theme mutations until all retained
-// records and the new subscription are enqueued in exactly the same order.
+// resume reattaches c from its replay cursor, or sends a resync and returns
+// false. Holding b.mu keeps new mutations out until the retained records are
+// queued, so the client sees one gapless sequence.
 func (b *Block) resume(c *client, r Request) bool {
 	reason := ""
 	switch {
