@@ -38,14 +38,14 @@ private struct SessionButton: View {
         Button { model.togglePalette(.sessions) } label: {
             HStack(spacing: Chrome.SessionButton.spacing) {
                 Image(systemName: model.activeHost.isLocal ? Chrome.SessionButton.symbol : Chrome.SessionButton.remoteSymbol)
-                    .font(.system(size: Chrome.SessionButton.symbolSize))
+                    .font(Chrome.font(Chrome.SessionButton.symbolSize))
                 VStack(alignment: .leading, spacing: 1) {
                     Text(model.activeSession?.name ?? "illogical")
-                        .font(.system(size: Chrome.SessionButton.titleSize, weight: .semibold))
+                        .font(Chrome.font(Chrome.SessionButton.titleSize, .semibold))
                         .opacity(Chrome.SessionButton.titleOpacity)
                         .lineLimit(1)
                     Text(model.activeHost.name)
-                        .font(.system(size: Chrome.SessionButton.subtitleSize))
+                        .font(Chrome.font(Chrome.SessionButton.subtitleSize))
                         .opacity(Chrome.SessionButton.subtitleOpacity)
                 }
             }
@@ -120,7 +120,7 @@ struct DeckTab: View {
             FadingTitle(text: highlightedTitle)
             Button { model.closeTab(deck.id) } label: {
                 Image(systemName: "xmark")
-                    .font(.system(size: Chrome.Tab.closeSymbolSize, weight: .semibold))
+                    .font(Chrome.font(Chrome.Tab.closeSymbolSize, .semibold))
                     .frame(width: Chrome.Tab.closeButton.width, height: Chrome.Tab.closeButton.height)
             }
             .buttonStyle(.plain)
@@ -155,7 +155,7 @@ struct DeckTab: View {
         var text = AttributedString(title)
         if vertical, !model.sidebarFilter.isEmpty,
            let range = text.range(of: model.sidebarFilter, options: [.caseInsensitive, .diacriticInsensitive]) {
-            text[range].font = .system(size: Chrome.Tab.titleSize, weight: .semibold)
+            text[range].font = Chrome.font(Chrome.Tab.titleSize, .semibold)
         }
         return text
     }
@@ -170,7 +170,7 @@ struct FadingTitle: View {
 
     var body: some View {
         Text(text)
-            .font(.system(size: size, weight: weight))
+            .font(Chrome.font(size, weight))
             .lineLimit(1)
             .fixedSize()
             .frame(maxWidth: .infinity, alignment: .leading)

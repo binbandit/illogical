@@ -5,6 +5,16 @@ import SwiftUI
 /// Values marked "measured" come from Superlogical frames (1 Oct 2026, traffic
 /// lights 20 pt apart as the scale); the rest await the visual spec.
 enum Chrome {
+    /// The UI typeface. Every chrome font goes through `font(_:_:)`, so the
+    /// family is a one-line change.
+    enum Typography {
+        static let design: Font.Design = .default
+    }
+
+    static func font(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font {
+        .system(size: size, weight: weight, design: Typography.design)
+    }
+
     enum Titlebar {
         /// Measured: window top to the hairline under the tab strip.
         static let height: CGFloat = 36
@@ -92,8 +102,16 @@ enum Chrome {
         static let padding: CGFloat = 10
         static let hostSpacing: CGFloat = 18
         static let sessionSpacing: CGFloat = 13
-        static let headerSize: CGFloat = 11
-        static let filterSize: CGFloat = 12
+        static let rowSpacing: CGFloat = 4
+        static let hostFont = Chrome.font(10, .semibold)
+        static let hostOpacity = 0.4
+        static let sessionFont = Chrome.font(11, .semibold)
+        static let sessionOpacity = 0.55
+        static let sessionGlyphFont = Chrome.font(9)
+        static let addFont = Chrome.font(10)
+        static let filterFont = Chrome.font(12)
+        static let filterPadding: CGFloat = 9
+        static let filterFillOpacity = 0.045
     }
 
     enum Palette {
@@ -113,9 +131,17 @@ enum Chrome {
         static let directoryHeaderHeight: CGFloat = 38
         /// Kept free below the palette in short windows.
         static let bottomMargin: CGFloat = 16
-        static let titleSize: CGFloat = 12
-        static let detailSize: CGFloat = 10
+        static let titleFont = Chrome.font(12)
+        static let detailFont = Chrome.font(10)
+        static let actionFont = Chrome.font(11)
+        static let pathFont = Font.system(size: 10, design: .monospaced)
+        static let swatchFont = Font.system(size: 9, design: .monospaced)
+        static let searchPadding: CGFloat = 12
+        static let listPadding: CGFloat = 7
+        static let borderOpacity = 0.22
+        static let shadowOpacity = 0.28
         static let shadowRadius: CGFloat = 20
+        static let dimOpacity = 0.45
     }
 
     enum Search {
@@ -124,7 +150,12 @@ enum Chrome {
         static let compactHeight: CGFloat = 61
         static let compactThreshold: CGFloat = 280
         static let cornerRadius: CGFloat = 10
-        static let fontSize: CGFloat = 11
+        static let font = Chrome.font(fieldSize)
+        /// The query field is AppKit, sized in points.
+        static let fieldSize: CGFloat = 11
+        static let padding: CGFloat = 11
+        static let shadowOpacity = 0.2
+        static let shadowRadius: CGFloat = 12
     }
 
     enum Overview {
@@ -133,10 +164,20 @@ enum Chrome {
         static let compactPreviewHeight: CGFloat = 112
         static let expandedPreviewHeight: CGFloat = 165
         static let cardRadius: CGFloat = 12
+        static let cardPadding: CGFloat = 8
+        static let cardFillOpacity = 0.035
+        static let headerFont = Chrome.font(13, .semibold)
+        static let sectionFont = Chrome.font(11, .medium)
+        static let cardTitleFont = Chrome.font(11)
+    }
+
+    enum EmptyState {
+        static let symbolFont = Chrome.font(38, .ultraLight)
+        static let messageFont = Chrome.font(15)
     }
 
     enum Notice {
-        static let fontSize: CGFloat = 12
+        static let font = Chrome.font(12)
         static let padding: CGFloat = 10
         static let margin: CGFloat = 16
     }

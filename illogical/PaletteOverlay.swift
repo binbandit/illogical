@@ -62,8 +62,8 @@ struct PaletteOverlay: View {
         }
         .frame(width: mode == .sessions ? Chrome.Palette.sessionsWidth : Chrome.Palette.width)
         .background { RoundedRectangle(cornerRadius: Chrome.Palette.cornerRadius).fill(.regularMaterial) }
-        .overlay { RoundedRectangle(cornerRadius: Chrome.Palette.cornerRadius).stroke(theme.text.opacity(0.22), lineWidth: 0.5) }
-        .shadow(color: .black.opacity(0.28), radius: Chrome.Palette.shadowRadius, y: 8)
+        .overlay { RoundedRectangle(cornerRadius: Chrome.Palette.cornerRadius).stroke(theme.text.opacity(Chrome.Palette.borderOpacity), lineWidth: 0.5) }
+        .shadow(color: .black.opacity(Chrome.Palette.shadowOpacity), radius: Chrome.Palette.shadowRadius, y: 8)
     }
 
     private var searchRow: some View {
@@ -80,7 +80,7 @@ struct PaletteOverlay: View {
                 Button { query = "" } label: { Image(systemName: "xmark.circle.fill").opacity(0.4) }.buttonStyle(.plain)
             }
         }
-        .padding(12)
+        .padding(Chrome.Palette.searchPadding)
     }
 
     private var directoryHeader: some View {
@@ -89,9 +89,9 @@ struct PaletteOverlay: View {
             Spacer()
             if model.directoryLoading { ProgressView().controlSize(.mini) }
         }
-        .font(.system(size: 10, design: .monospaced))
+        .font(Chrome.Palette.pathFont)
         .opacity(0.5)
-        .padding(12)
+        .padding(Chrome.Palette.searchPadding)
     }
 
     private var results: some View {
@@ -108,10 +108,10 @@ struct PaletteOverlay: View {
                             .id(index)
                     }
                     if items.isEmpty {
-                        Text(emptyText).font(.system(size: Chrome.Palette.titleSize)).opacity(0.45).padding(24)
+                        Text(emptyText).font(Chrome.Palette.titleFont).opacity(Chrome.Palette.dimOpacity).padding(24)
                     }
                 }
-                .padding(7)
+                .padding(Chrome.Palette.listPadding)
             }
             .frame(height: items.isEmpty ? 78 : min(CGFloat(items.count) * (Chrome.Palette.rowHeight + Chrome.Palette.rowSpacing) + 14, maximum))
             .onChange(of: selected) { reader.scrollTo(selected) }
@@ -230,15 +230,15 @@ private struct PaletteRow: View {
     var body: some View {
         HStack(spacing: 12) {
             icon
-            Text(item.title).font(.system(size: Chrome.Palette.titleSize)).lineLimit(1)
+            Text(item.title).font(Chrome.Palette.titleFont).lineLimit(1)
             if item.elsewhere {
-                Image(systemName: "macwindow").font(.system(size: Chrome.Palette.detailSize)).opacity(0.6).help("Open in another window")
+                Image(systemName: "macwindow").font(Chrome.Palette.detailFont).opacity(0.6).help("Open in another window")
             }
             Spacer()
-            if showsDetail { Text(item.detail).font(.system(size: Chrome.Palette.detailSize)).opacity(0.45).lineLimit(1) }
-            if item.current { Image(systemName: "checkmark").font(.system(size: Chrome.Palette.detailSize)) }
+            if showsDetail { Text(item.detail).font(Chrome.Palette.detailFont).opacity(Chrome.Palette.dimOpacity).lineLimit(1) }
+            if item.current { Image(systemName: "checkmark").font(Chrome.Palette.detailFont) }
             if let rename = item.rename {
-                Button(action: rename) { Image(systemName: "pencil").font(.system(size: 11)).opacity(0.7).frame(width: 22) }
+                Button(action: rename) { Image(systemName: "pencil").font(Chrome.Palette.actionFont).opacity(0.7).frame(width: 22) }
                     .buttonStyle(.plain)
                     .help("Rename Session…")
                     .accessibilityLabel("Rename \(item.title)")
@@ -262,7 +262,7 @@ private struct PaletteRow: View {
             RoundedRectangle(cornerRadius: 5)
                 .fill(theme.color)
                 .frame(width: 25, height: 25)
-                .overlay(Text("Aa").font(.system(size: 9, design: .monospaced)).foregroundStyle(theme.text))
+                .overlay(Text("Aa").font(Chrome.Palette.swatchFont).foregroundStyle(theme.text))
                 .overlay(RoundedRectangle(cornerRadius: 5).stroke(.primary.opacity(0.15), lineWidth: 0.5))
         }
     }

@@ -10,7 +10,7 @@ struct WorkspaceOverview: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
-                Text(expanded ? "Sessions" : model.activeSession?.name ?? "Tabs").font(.system(size: 13, weight: .semibold))
+                Text(expanded ? "Sessions" : model.activeSession?.name ?? "Tabs").font(Chrome.Overview.headerFont)
                 Spacer()
                 Button { model.dismissPeek() } label: {
                     Image(systemName: "xmark.circle.fill").opacity(0.4).frame(width: 24, height: 24)
@@ -34,7 +34,7 @@ struct WorkspaceOverview: View {
                 ForEach(model.hosts) { host in
                     ForEach(model.sessions(on: host.id)) { session in
                         VStack(alignment: .leading, spacing: 10) {
-                            Text("\(session.name) · \(host.name)").font(.system(size: 11, weight: .medium)).opacity(0.5)
+                            Text("\(session.name) · \(host.name)").font(Chrome.Overview.sectionFont).opacity(0.5)
                             LazyVGrid(columns: [GridItem(.adaptive(minimum: 240, maximum: 420), spacing: 16)], spacing: 16) {
                                 ForEach(session.windows) { deck in
                                     OverviewCard(model: model, deck: deck, session: session.id, host: host.id, expanded: true)
@@ -79,11 +79,11 @@ private struct OverviewCard: View {
                 HStack(spacing: 7) {
                     ProcessBadgeView(badge: model.processBadge(model.preferredBlock(in: deck, host: host), host: host),
                                      stacked: deck.root.blocks.count > 1)
-                    Text(model.deckTitle(deck, host: host)).font(.system(size: 11)).lineLimit(1)
+                    Text(model.deckTitle(deck, host: host)).font(Chrome.Overview.cardTitleFont).lineLimit(1)
                 }
             }
-            .padding(8)
-            .background(theme.text.opacity(0.035), in: RoundedRectangle(cornerRadius: Chrome.Overview.cardRadius))
+            .padding(Chrome.Overview.cardPadding)
+            .background(theme.text.opacity(Chrome.Overview.cardFillOpacity), in: RoundedRectangle(cornerRadius: Chrome.Overview.cardRadius))
             .overlay(RoundedRectangle(cornerRadius: Chrome.Overview.cardRadius)
                 .stroke(selected ? theme.tint.opacity(0.6) : theme.border, lineWidth: 1))
             .contentShape(Rectangle())

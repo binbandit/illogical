@@ -46,15 +46,15 @@ private struct TerminalSearchBar: View {
                 }
             }
         }
-        .font(.system(size: Chrome.Search.fontSize))
+        .font(Chrome.Search.font)
         .buttonStyle(.plain)
-        .padding(11)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: Chrome.Search.cornerRadius))
-        .shadow(color: .black.opacity(0.2), radius: 12, y: 4)
+        .padding(Chrome.Search.padding)
+        .background { RoundedRectangle(cornerRadius: Chrome.Search.cornerRadius).fill(.regularMaterial) }
+        .shadow(color: .black.opacity(Chrome.Search.shadowOpacity), radius: Chrome.Search.shadowRadius, y: 4)
     }
 
     private var field: some View {
-        NativeSearchField(text: $search.query, placeholder: "Find in terminal", size: Chrome.Search.fontSize,
+        NativeSearchField(text: $search.query, placeholder: "Find in terminal", size: Chrome.Search.fieldSize,
                           onSubmit: { backwards in model.updateSearch(block, direction: backwards ? -1 : 1) },
                           onEscape: { model.closeSearch(block) },
                           onMove: { model.updateSearch(block, direction: Int32($0)) },

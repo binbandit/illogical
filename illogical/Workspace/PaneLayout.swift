@@ -192,12 +192,12 @@ private struct PaneTitleRow: View {
             ProcessGlyph(badge: model.processBadge(block, host: host))
                 .opacity(Chrome.PaneTitle.titleOpacity)
             Text(info?.displayTitle ?? "Terminal")
-                .font(.system(size: Chrome.PaneTitle.titleSize, weight: .semibold))
+                .font(Chrome.font(Chrome.PaneTitle.titleSize, .semibold))
                 .lineLimit(1)
                 .opacity(Chrome.PaneTitle.titleOpacity)
             if info?.parked == true {
                 Image(systemName: "moon.zzz")
-                    .font(.system(size: Chrome.PaneTitle.parkedSymbolSize))
+                    .font(Chrome.font(Chrome.PaneTitle.parkedSymbolSize))
                     .opacity(0.35)
                     .help("Emulator parked. Your process is still running.")
             }
@@ -224,7 +224,7 @@ private struct PaneTitleRow: View {
     private func control(_ symbol: String, _ label: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: symbol)
-                .font(.system(size: Chrome.PaneTitle.controlSymbolSize))
+                .font(Chrome.font(Chrome.PaneTitle.controlSymbolSize))
                 .frame(width: Chrome.PaneTitle.control.width, height: Chrome.PaneTitle.control.height)
         }
         .buttonStyle(.plain)

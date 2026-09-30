@@ -1,6 +1,10 @@
 import Foundation
 import Darwin
 
+/// One client connection to an illogical service: the local daemon's Unix
+/// socket, or the bundled helper relaying to a daemon it starts or reaches
+/// over SSH. Messages are delivered on the main actor in order; the
+/// connection reconnects with backoff until closed.
 @MainActor
 final class ServiceConnection {
     let host: HostProfile
@@ -43,20 +47,27 @@ final class ServiceConnection {
             consumeSocket(socket, token: token)
             return
         }
-        let task = Process()
-        if host.isLocal {
-            guard let resources = Bundle.main.resourceURL else { onStatus?("The application resources are missing."); return }
-            task.executableURL = resources.appendingPathComponent("bin/illogical")
-            task.arguments = ["connect"]
-        } else {
-            guard let resources = Bundle.main.resourceURL else { onStatus?("The application resources are missing."); return }
-            task.executableURL = resources.appendingPathComponent("bin/illogical")
-            task.arguments = ["remote", host.address, host.executable]
+        // No socket yet: the helper starts the local daemon, or relays to a
+        // remote one over SSH.
+        guard let resources = Bundle.main.resourceURL else {
+            onStatus?("The application resources are missing.")
+            return
         }
+        let task = Process()
+        task.executableURL = resources.appendingPathComponent("bin/illogical")
+        task.arguments = host.isLocal ? ["connect"] : ["remote", host.address, host.executable]
         let stdin = Pipe(), stdout = Pipe(), stderr = Pipe()
-        task.standardInput = stdin; task.standardOutput = stdout; task.standardError = stderr
-        do { try task.run() } catch { retry(after: error.localizedDescription, token: token); return }
-        process = task; input = stdin.fileHandleForWriting
+        task.standardInput = stdin
+        task.standardOutput = stdout
+        task.standardError = stderr
+        do {
+            try task.run()
+        } catch {
+            retry(after: error.localizedDescription, token: token)
+            return
+        }
+        process = task
+        input = stdin.fileHandleForWriting
         guard installOutbox(token: token, socket: false) else { return }
         mayUpgradeLocalHelper = host.isLocal
         let reader = stdout.fileHandleForReading
@@ -67,7 +78,8 @@ final class ServiceConnection {
             var buffer = [UInt8](repeating: 0, count: 4096)
             while autoreleasepool(invoking: { () -> Bool in
                 guard let data = try? Self.readAvailable(descriptor, buffer: &buffer) else { return false }
-                errors.append(data); return true
+                errors.append(data)
+                return true
             }) { }
             try? errorReader.close()
         }
@@ -230,7 +242,8 @@ final class ServiceConnection {
             return reject("Too many terminal requests are waiting for replies. The request was not sent.")
         }
         do {
-            var data = try JSONEncoder().encode(request); data.append(10)
+            var data = try JSONEncoder().encode(request)
+            data.append(10)
             guard outbox.enqueue(data) else {
                 return reject("The terminal connection is busy. The request was not sent; try again when it catches up.")
             }
@@ -241,20 +254,26 @@ final class ServiceConnection {
     }
 
     func close() {
-        stopped = true; generation = UUID()
+        stopped = true
+        generation = UUID()
         releaseTransport()
     }
 
     private func releaseTransport() {
-        reconnectTask?.cancel(); reconnectTask = nil
-        mailbox?.cancel(); mailbox = nil
-        outbox?.cancel(); outbox = nil
-        mayUpgradeLocalHelper = false; hasSubmittedRequest = false
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        mailbox?.cancel()
+        mailbox = nil
+        outbox?.cancel()
+        outbox = nil
+        mayUpgradeLocalHelper = false
+        hasSubmittedRequest = false
         if usesSocket, let input { Darwin.shutdown(input.fileDescriptor, SHUT_RDWR) }
         usesSocket = false
         if process?.isRunning == true { process?.terminate() }
         process = nil
-        try? input?.close(); input = nil
+        try? input?.close()
+        input = nil
         // The background reader owns its close. Closing a pipe FileHandle
         // here can contend with its blocking read and stall the main actor.
         let abandoned = callbacks
@@ -279,11 +298,22 @@ nonisolated struct ReconnectBackoff {
 }
 
 
+/// The last few kilobytes of the helper's standard error, reported when the
+/// connection ends.
 private final class ErrorTail: @unchecked Sendable {
     private let lock = NSLock()
     private var data = Data()
-    func append(_ value: Data) { lock.lock(); defer { lock.unlock() }; data.append(value); if data.count > 4000 { data = Data(data.suffix(4000)) } }
-    var message: String? { lock.lock(); defer { lock.unlock() }; return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    func append(_ value: Data) {
+        lock.withLock {
+            data.append(value)
+            if data.count > 4000 { data = Data(data.suffix(4000)) }
+        }
+    }
+
+    var message: String? {
+        lock.withLock { String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) }
+    }
 }
 
 // One bounded mailbox owns one worker. A full socket/pipe waits on writability

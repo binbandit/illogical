@@ -123,8 +123,8 @@ private struct WorkspaceArea: View {
             }
         } else {
             VStack(spacing: 18) {
-                Image(systemName: "terminal").font(.system(size: 38, weight: .ultraLight)).opacity(0.45)
-                Text(model.statuses[model.selectedHost] ?? "Opening a terminal…").font(.system(size: 15))
+                Image(systemName: "terminal").font(Chrome.EmptyState.symbolFont).opacity(0.45)
+                Text(model.statuses[model.selectedHost] ?? "Opening a terminal…").font(Chrome.EmptyState.messageFont)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -135,7 +135,7 @@ private struct StatusCapsule: View {
     let text: String
     var body: some View {
         Text(text)
-            .font(.system(size: Chrome.Notice.fontSize))
+            .font(Chrome.Notice.font)
             .padding(Chrome.Notice.padding)
             .background(.regularMaterial, in: Capsule())
             .padding(Chrome.Notice.margin)

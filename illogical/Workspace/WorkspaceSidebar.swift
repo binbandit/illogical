@@ -37,8 +37,8 @@ private struct HostSection: View {
         VStack(alignment: .leading, spacing: Chrome.Sidebar.sessionSpacing) {
             if showsHeader {
                 Label(host.name, systemImage: host.isLocal ? "desktopcomputer" : "network")
-                    .font(.system(size: 10, weight: .semibold))
-                    .opacity(0.4)
+                    .font(Chrome.Sidebar.hostFont)
+                    .opacity(Chrome.Sidebar.hostOpacity)
                     .padding(.horizontal, 9)
             }
             ForEach(model.sessions(on: host.id).filter(matchesFilter)) { session in
@@ -62,18 +62,18 @@ private struct SessionSection: View {
     private var elsewhere: Bool { model.otherWindow(showing: SessionKey(host: host, session: session.id)) != nil }
 
     var body: some View {
-        VStack(spacing: 4) {
+        VStack(spacing: Chrome.Sidebar.rowSpacing) {
             HStack(spacing: 5) {
-                Text(session.name).font(.system(size: Chrome.Sidebar.headerSize, weight: .semibold)).opacity(0.55)
+                Text(session.name).font(Chrome.Sidebar.sessionFont).opacity(Chrome.Sidebar.sessionOpacity)
                 if elsewhere {
-                    Image(systemName: "macwindow").font(.system(size: 9)).opacity(0.45).help("Open in another window")
+                    Image(systemName: "macwindow").font(Chrome.Sidebar.sessionGlyphFont).opacity(Chrome.Sidebar.hostOpacity).help("Open in another window")
                 }
                 Spacer()
                 Button {
                     model.choose(session: session.id, host: host)
                     if model.shownSession == SessionKey(host: host, session: session.id) { model.newTab() }
                 } label: {
-                    Image(systemName: "plus").font(.system(size: 10))
+                    Image(systemName: "plus").font(Chrome.Sidebar.addFont)
                 }
                 .buttonStyle(.plain)
                 .help("New Tab in \(session.name)")
@@ -108,9 +108,9 @@ private struct FilterField: View {
                 .buttonStyle(.plain)
                 .help("Add Remote Host")
         }
-        .font(.system(size: Chrome.Sidebar.filterSize))
-        .padding(9)
-        .background(model.preferences.theme.text.opacity(0.045), in: Capsule())
+        .font(Chrome.Sidebar.filterFont)
+        .padding(Chrome.Sidebar.filterPadding)
+        .background(model.preferences.theme.text.opacity(Chrome.Sidebar.filterFillOpacity), in: Capsule())
         .padding(Chrome.Sidebar.padding)
     }
 }
