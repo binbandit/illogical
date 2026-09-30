@@ -226,6 +226,58 @@ func TestParkingKeepsProcessAndWakesOnOutput(t *testing.T) {
 	}
 }
 
+// Every malformed request gets an error reply; none may take the service
+// (and every shell it owns) down.
+func TestMalformedRequestsFailWithoutHarm(t *testing.T) {
+	_, socket := startTest(t)
+	c := connectTest(t, socket)
+	created := c.request(t, Request{Method: "session.new", Command: []string{"/bin/cat"}, KeepOpen: true})
+	zero := uint64(0)
+	for _, r := range []Request{
+		{Method: "no.such.method"},
+		{Method: "session.new", Cols: 65535, Rows: 65535, Command: []string{"/bin/cat"}},
+		{Method: "session.new", Cwd: "relative/path"},
+		{Method: "session.new", Command: []string{""}},
+		{Method: "window.new", Session: "missing"},
+		{Method: "block.split", Block: "missing"},
+		{Method: "block.key", Block: created.Block},
+		{Method: "block.key", Block: created.Block, Key: &KeyInput{Name: "", Mods: "nonsense"}},
+		{Method: "block.mouse", Block: created.Block, Mouse: &MouseInput{X: 1 << 31, Y: 1 << 31, Pixels: true}},
+		{Method: "block.resize", Block: created.Block, Cols: 0, Rows: 0},
+		{Method: "block.theme", Block: created.Block, Theme: &Theme{Palette: []uint32{1}}},
+		{Method: "block.viewport", Block: created.Block, Viewport: &zero},
+		{Method: "block.event", Block: created.Block, Label: "anything"},
+		{Method: "block.capture", Block: created.Block, Format: "pdf"},
+		{Method: "layout.resize", Window: created.Window, Target: "missing", Ratio: 2},
+		{Method: "window.move", Window: created.Window, Target: "missing"},
+		{Method: "block.move", Block: created.Block, Target: created.Block + "x"},
+		{Method: "focus", Session: "missing"},
+		{Method: "client.detach", Client: "missing"},
+		{Method: "remote.pair", Label: "not-an-ip"},
+	} {
+		r.ID = NewID()
+		if err := c.encoder.Encode(r); err != nil {
+			t.Fatal(err)
+		}
+		m := c.next(t)
+		for m.ID != r.ID {
+			m = c.next(t)
+		}
+		if m.Error == "" {
+			t.Fatalf("%s accepted %+v", r.Method, r)
+		}
+	}
+	if _, err := c.conn.Write([]byte("{not json\n")); err != nil {
+		t.Fatal(err)
+	}
+	if m := c.next(t); m.Type != "error" {
+		t.Fatalf("invalid JSON reply %+v", m)
+	}
+	if c.request(t, Request{Method: "block.process", Block: created.Block}).Process.ExitCode != nil {
+		t.Fatal("terminal did not survive malformed requests")
+	}
+}
+
 func TestSocketIsPrivateAndDuplicateServiceRejected(t *testing.T) {
 	s, socket := startTest(t)
 	info, err := os.Stat(socket)
