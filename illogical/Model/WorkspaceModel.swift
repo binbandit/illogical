@@ -4,7 +4,7 @@ import Observation
 import SwiftUI
 
 enum PaletteMode: String, Identifiable {
-    case sessions, commands, themes, directory
+    case sessions, commands, themes, directory, interfaceStyle, fontSize
     var id: String { rawValue }
 }
 
@@ -540,6 +540,18 @@ final class WorkspaceModel {
             return ProcessBadge(program: process.jobName)
         }
         return ProcessBadge(title: info(block, host: host)?.title ?? "") ?? .shell
+    }
+
+    /// A tab's badges, front first: its most specific process (the focused
+    /// pane's on a tie), then its other panes in layout order.
+    func tabBadges(_ deck: Deck, host: String? = nil) -> [ProcessBadge] {
+        let preferred = preferredBlock(in: deck, host: host)
+        let blocks = deck.root.blocks.filter { $0 == preferred } + deck.root.blocks.filter { $0 != preferred }
+        let badges = blocks.map { processBadge($0, host: host) }
+        guard let front = badges.indices.max(by: { badges[$0].specificity < badges[$1].specificity }) else { return [.shell] }
+        var ordered = badges
+        ordered.insert(ordered.remove(at: front), at: 0)
+        return ordered
     }
 
     // MARK: Engines

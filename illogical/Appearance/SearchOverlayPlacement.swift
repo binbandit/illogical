@@ -1,17 +1,23 @@
 import Foundation
 import CoreGraphics
 
+/// Where a pane's search bar goes: 8 pt from the pane's right edge and 6 pt
+/// below its top, unless that would cover the active match.
 enum SearchOverlayPlacement {
+    /// The terminal's grid inset, where match rectangles start.
+    private static let gridInset: CGFloat = 8
+    private static let trailingInset: CGFloat = 8
+    private static let topInset: CGFloat = 6
+
     static func origin(viewport: CGSize, bar: CGSize, cell: CGSize, titleHeight: CGFloat,
                        spans: [TerminalSearchSpan]) -> CGPoint {
-        let padding: CGFloat = 8
-        let x = max(padding, viewport.width - bar.width - 12)
-        let minY = titleHeight + padding
-        let maxY = max(minY, viewport.height - bar.height - padding)
-        let preferred = min(maxY, titleHeight + 12)
+        let x = max(gridInset, viewport.width - bar.width - trailingInset)
+        let minY = titleHeight + topInset
+        let maxY = max(minY, viewport.height - bar.height - gridInset)
+        let preferred = min(maxY, minY)
         let matches = spans.map { span in
-            CGRect(x: padding + CGFloat(span.startColumn) * cell.width,
-                   y: titleHeight + padding + CGFloat(span.row) * cell.height,
+            CGRect(x: gridInset + CGFloat(span.startColumn) * cell.width,
+                   y: titleHeight + gridInset + CGFloat(span.row) * cell.height,
                    width: CGFloat(span.endColumn - span.startColumn + 1) * cell.width, height: cell.height)
         }.filter { $0.minX < x + bar.width && $0.maxX > x }
         func overlaps(_ y: CGFloat) -> Bool {

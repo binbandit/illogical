@@ -1,145 +1,153 @@
 import SwiftUI
 
-/// The top bar: traffic-light space, the session button, the tab strip and
-/// the new-tab button. Empty space drags the window.
+/// The top bar with horizontal tabs: the session button, fixed-width tabs
+/// and the new-tab button, on one centre line with the traffic lights.
+/// Empty space drags the window.
 struct WorkspaceTitlebar: View {
     let model: WorkspaceModel
     let isFullScreen: Bool
 
     var body: some View {
-        HStack(spacing: Chrome.Titlebar.spacing) {
-            if !isFullScreen { Color.clear.frame(width: Chrome.Titlebar.trafficLightWidth) }
-            if !model.preferences.verticalTabs {
-                SessionButton(model: model)
-                TabStrip(model: model)
-            }
-            Spacer(minLength: 0)
-            Button { model.newTab() } label: {
-                Image(systemName: "plus").frame(width: Chrome.Titlebar.newTabButton.width, height: Chrome.Titlebar.newTabButton.height)
-            }
-            .buttonStyle(.plain)
-            .help("New Tab (⌘T)")
-            .accessibilityLabel("New tab")
+        HStack(spacing: 0) {
+            SessionButton(model: model)
+            TabStrip(model: model)
+                .padding(.leading, Chrome.Titlebar.sessionToTabs - Chrome.Titlebar.stripClipSlack)
+            Spacer(minLength: Chrome.Titlebar.tabsToNewTab)
+            NewTabButton(model: model)
         }
-        .padding(.trailing, Chrome.Titlebar.trailingPadding)
+        .padding(.leading, isFullScreen ? Chrome.Titlebar.fullScreenLeading : Chrome.Titlebar.sessionLeading)
+        .padding(.trailing, Chrome.Titlebar.newTabCentreInset - Chrome.Titlebar.newTabButton / 2)
         .frame(height: Chrome.Titlebar.height)
         .background(WindowDragArea())
-        .overlay(alignment: .bottom) {
-            Rectangle().fill(model.preferences.theme.border).frame(height: Chrome.Titlebar.separatorWidth)
-        }
     }
 }
 
-/// Shows the current session and host; opens the session picker.
+struct NewTabButton: View {
+    let model: WorkspaceModel
+
+    var body: some View {
+        Button { model.newTab() } label: {
+            Image(systemName: "plus")
+                .font(Chrome.font(Chrome.Titlebar.newTabSymbolSize))
+                .foregroundStyle(model.preferences.colors.secondary)
+                .frame(width: Chrome.Titlebar.newTabButton, height: Chrome.Titlebar.newTabButton)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("New Tab (⌘T)")
+        .accessibilityLabel("New tab")
+    }
+}
+
+/// The current session and its host; opens the session picker below it.
 private struct SessionButton: View {
     let model: WorkspaceModel
 
     var body: some View {
+        let colors = model.preferences.colors
         Button { model.togglePalette(.sessions) } label: {
-            HStack(spacing: Chrome.SessionButton.spacing) {
-                Image(systemName: model.activeHost.isLocal ? Chrome.SessionButton.symbol : Chrome.SessionButton.remoteSymbol)
+            HStack(spacing: Chrome.SessionButton.symbolTextSpacing) {
+                Image(systemName: model.activeHost.isLocal ? Chrome.SessionButton.localSymbol : Chrome.SessionButton.remoteSymbol)
                     .font(Chrome.font(Chrome.SessionButton.symbolSize))
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(model.activeSession?.name ?? "illogical")
-                        .font(Chrome.font(Chrome.SessionButton.titleSize, .semibold))
-                        .opacity(Chrome.SessionButton.titleOpacity)
-                        .lineLimit(1)
+                    .frame(width: Chrome.SessionButton.symbolWidth)
+                VStack(alignment: .leading, spacing: Chrome.SessionButton.lineSpacing) {
+                    Text(model.activeSession?.name ?? "illogical").font(Chrome.SessionButton.nameFont)
                     Text(model.activeHost.name)
-                        .font(Chrome.font(Chrome.SessionButton.subtitleSize))
-                        .opacity(Chrome.SessionButton.subtitleOpacity)
+                        .font(Chrome.SessionButton.subtitleFont)
+                        .foregroundStyle(colors.tertiary)
                 }
+                .lineLimit(1)
             }
-            .padding(.leading, Chrome.SessionButton.horizontalPadding)
-            .padding(.trailing, Chrome.SessionButton.horizontalPadding)
+            .foregroundStyle(colors.secondary)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help("Switch Session (⌘K)")
-        .accessibilityLabel("Switch session")
+        .help("Change Session (⌘K)")
+        .accessibilityLabel("Change session")
     }
 }
 
-/// The current session's tabs. The strip is only as wide as its tabs so the
-/// space after them stays a window drag area.
+/// The current session's tabs, scrolled to keep the selected one in view.
+/// The strip is only as wide as its tabs so the space after them stays a
+/// window drag area.
 private struct TabStrip: View {
     let model: WorkspaceModel
     @State private var contentWidth: CGFloat = 0
+    @State private var hovered: String?
 
     var body: some View {
         let tabs = model.activeSession?.windows ?? []
         ScrollViewReader { reader in
             ScrollView(.horizontal) {
-                HStack(spacing: Chrome.Tab.spacing) {
+                HStack(spacing: 0) {
                     ForEach(Array(tabs.enumerated()), id: \.element.id) { index, deck in
-                        DeckTab(model: model, deck: deck, session: model.selectedSession, host: model.selectedHost)
+                        let next = tabs.indices.contains(index + 1) ? tabs[index + 1].id : nil
+                        DeckTab(model: model, deck: deck, hovered: hovered == deck.id) { hovered = $0 ? deck.id : (hovered == deck.id ? nil : hovered) }
+                            .overlay(alignment: .trailing) {
+                                // Dividers sit only between two plain tabs.
+                                if let next, !isEmphasised(deck.id), !isEmphasised(next) {
+                                    Rectangle().fill(model.preferences.colors.tabDivider)
+                                        .frame(width: Chrome.Tab.divider.width, height: Chrome.Tab.divider.height)
+                                        .offset(x: Chrome.Tab.divider.width / 2)
+                                }
+                            }
                             .id(deck.id)
-                        if index < tabs.count - 1 {
-                            TabDivider(hidden: deck.id == model.selectedDeck || tabs[index + 1].id == model.selectedDeck)
-                        }
                     }
                 }
-                .padding(.vertical, 2)
+                .padding(.horizontal, Chrome.Titlebar.stripClipSlack)
                 .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { contentWidth = $0 }
             }
             .scrollIndicators(.hidden)
             .frame(maxWidth: contentWidth)
-            .onChange(of: model.selectedDeck) { reader.scrollTo(model.selectedDeck, anchor: .center) }
-            .onChange(of: tabs.map(\.id)) { reader.scrollTo(model.selectedDeck, anchor: .center) }
-            .onAppear { reader.scrollTo(model.selectedDeck, anchor: .center) }
+            .onChange(of: model.selectedDeck) { reader.scrollTo(model.selectedDeck) }
+            .onChange(of: tabs.map(\.id)) { reader.scrollTo(model.selectedDeck) }
+            .onAppear { reader.scrollTo(model.selectedDeck) }
         }
     }
+
+    private func isEmphasised(_ deck: String) -> Bool { deck == model.selectedDeck || deck == hovered }
 }
 
-private struct TabDivider: View {
-    let hidden: Bool
-    var body: some View {
-        Rectangle()
-            .fill(.primary.opacity(hidden ? 0 : Chrome.Tab.dividerOpacity))
-            .frame(width: 1, height: Chrome.Tab.dividerHeight)
-    }
-}
-
-/// A tab: process badge, a title that fades out when long, and a close
-/// button on hover. Also used as a sidebar row.
-struct DeckTab: View {
+/// A tab: process badges, a title that fades out when long, and a close
+/// button on hover. The selected tab is a capsule; a hovered one is filled.
+private struct DeckTab: View {
     let model: WorkspaceModel
     let deck: Deck
-    let session: String
-    let host: String
-    var vertical = false
-    @State private var hovering = false
+    let hovered: Bool
+    let onHover: (Bool) -> Void
 
-    private var selected: Bool { deck.id == model.selectedDeck && host == model.selectedHost && session == model.selectedSession }
-    private var theme: TerminalTheme { model.preferences.theme }
-    private var title: String { model.deckTitle(deck, host: host) }
+    private var selected: Bool { deck.id == model.selectedDeck }
+    private var title: String { model.deckTitle(deck) }
 
     var body: some View {
-        HStack(spacing: Chrome.Tab.contentSpacing) {
-            ProcessBadgeView(badge: model.processBadge(model.preferredBlock(in: deck, host: host), host: host),
-                             stacked: deck.root.blocks.count > 1)
-            FadingTitle(text: highlightedTitle)
-            Button { model.closeTab(deck.id) } label: {
-                Image(systemName: "xmark")
-                    .font(Chrome.font(Chrome.Tab.closeSymbolSize, .semibold))
-                    .frame(width: Chrome.Tab.closeButton.width, height: Chrome.Tab.closeButton.height)
-            }
-            .buttonStyle(.plain)
-            .opacity(hovering ? 1 : 0)
-            .allowsHitTesting(hovering)
-            .accessibilityHidden(!hovering)
-            .accessibilityLabel("Close tab")
+        let colors = model.preferences.colors
+        HStack(spacing: Chrome.Tab.badgeTitleSpacing) {
+            ProcessBadgeStack(badges: model.tabBadges(deck), isLight: colors.isLight)
+            FadingTitle(text: AttributedString(title), font: Chrome.Tab.titleFont, fade: Chrome.Tab.titleFade)
+                .foregroundStyle(selected ? colors.primary : colors.secondary)
         }
-        .padding(.horizontal, Chrome.Tab.horizontalPadding)
-        .frame(width: vertical ? nil : Chrome.Tab.width, height: Chrome.Tab.height)
-        .frame(maxWidth: vertical ? .infinity : nil)
-        .background(selected ? theme.selectedTabFill : .clear, in: Capsule())
-        .overlay(Capsule().stroke(selected ? theme.border : .clear, lineWidth: Chrome.Tab.borderWidth))
-        .contentShape(Rectangle())
-        .onTapGesture { model.choose(deck: deck.id, session: session, host: host) }
-        .onHover { hovering = $0 }
+        .padding(.leading, Chrome.Tab.leadingPadding)
+        .padding(.trailing, hovered ? Chrome.Tab.hoverTitleTrailingInset : Chrome.Tab.titleTrailingInset)
+        .frame(width: Chrome.Tab.width, height: Chrome.Tab.height, alignment: .leading)
+        .background {
+            let shape = Capsule()
+            if selected {
+                shape.fill(colors.selectedTabFill)
+                    .overlay(shape.strokeBorder(colors.selectedTabStroke, lineWidth: Chrome.Tab.strokeWidth))
+            } else if hovered {
+                shape.fill(colors.hoveredTabFill)
+            }
+        }
+        .overlay(alignment: .trailing) {
+            if hovered { closeButton(colors).transition(.opacity) }
+        }
+        .animation(Chrome.Tab.hoverAnimation, value: hovered)
+        .contentShape(Capsule())
+        .onTapGesture { model.choose(deck: deck.id, session: model.selectedSession, host: model.selectedHost) }
+        .onHover(perform: onHover)
         .contextMenu {
             Button("Rename Tab…") {
-                model.choose(deck: deck.id, session: session, host: host)
+                model.choose(deck: deck.id, session: model.selectedSession, host: model.selectedHost)
                 model.beginRenameTab(deck.id)
             }
             Button("Close Tab") { model.closeTab(deck.id) }
@@ -150,36 +158,40 @@ struct DeckTab: View {
         .accessibilityAction(named: Text("Close tab")) { model.closeTab(deck.id) }
     }
 
-    /// Emphasises the sidebar filter match.
-    private var highlightedTitle: AttributedString {
-        var text = AttributedString(title)
-        if vertical, !model.sidebarFilter.isEmpty,
-           let range = text.range(of: model.sidebarFilter, options: [.caseInsensitive, .diacriticInsensitive]) {
-            text[range].font = Chrome.font(Chrome.Tab.titleSize, .semibold)
+    private func closeButton(_ colors: ChromeColors) -> some View {
+        Button { model.closeTab(deck.id) } label: {
+            Image(systemName: "xmark")
+                .font(Chrome.font(Chrome.Tab.closeSymbolSize, .medium))
+                .foregroundStyle(colors.secondary)
+                .frame(width: Chrome.Tab.closeButton, height: Chrome.Tab.closeButton)
+                .contentShape(Rectangle())
         }
-        return text
+        .buttonStyle(.plain)
+        .padding(.trailing, Chrome.Tab.closeCentreInset - Chrome.Tab.closeButton / 2)
+        .accessibilityLabel("Close tab")
     }
 }
 
-/// A single-line title that fades out at the trailing edge instead of
+/// A single-line title that fades out at its trailing edge instead of
 /// truncating with an ellipsis.
 struct FadingTitle: View {
     let text: AttributedString
-    var size: CGFloat = Chrome.Tab.titleSize
-    var weight: Font.Weight = .medium
+    let font: Font
+    let fade: CGFloat
 
     var body: some View {
         Text(text)
-            .font(Chrome.font(size, weight))
+            .font(font)
             .lineLimit(1)
             .fixedSize()
-            .frame(maxWidth: .infinity, alignment: .leading)
+            // Zero minimum width lets the title give way to its container;
+            // otherwise a long title widens every column it sits in.
+            .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
             .clipped()
             .mask {
                 HStack(spacing: 0) {
                     Rectangle()
-                    LinearGradient(colors: [.black, .clear], startPoint: .leading, endPoint: .trailing)
-                        .frame(width: Chrome.Tab.titleFade)
+                    LinearGradient(colors: [.black, .clear], startPoint: .leading, endPoint: .trailing).frame(width: fade)
                 }
             }
     }

@@ -13,6 +13,8 @@ enum WorkspaceCommand: String, CaseIterable, Identifiable {
     case switchSession, commandPalette, renameSession, chooseTheme, importGhosttyThemes, addRemoteHost, settings
     case nextTab, previousTab, moveTabLeft, moveTabRight, renameTab
     case splitRight, splitDown, zoomPane, nextPane, previousPane, equalizePanes
+    // Appearance settings the palette offers directly.
+    case changeInterfaceStyle, compactDensity, comfortableDensity, changeFontSize, toggleFontSmoothing, toggleCopyOnSelection
 
     var id: String { rawValue }
 
@@ -43,11 +45,11 @@ enum WorkspaceCommand: String, CaseIterable, Identifiable {
         case .pageUp: "Page Up"
         case .pageDown: "Page Down"
         case .toggleFullScreen: "Toggle Full Screen"
-        case .switchSession: "Switch Session…"
+        case .switchSession: "Change Session…"
         case .commandPalette: "Command Palette…"
         case .renameSession: "Rename Session…"
-        case .chooseTheme: "Choose Theme…"
-        case .importGhosttyThemes: "Import Ghostty Themes…"
+        case .chooseTheme: "Change Theme…"
+        case .importGhosttyThemes: "Migrate Theme from Ghostty Config…"
         case .addRemoteHost: "Add Remote Host…"
         case .settings: "Settings…"
         case .nextTab: "Show Next Tab"
@@ -55,22 +57,78 @@ enum WorkspaceCommand: String, CaseIterable, Identifiable {
         case .moveTabLeft: "Move Tab Left"
         case .moveTabRight: "Move Tab Right"
         case .renameTab: "Rename Tab…"
-        case .splitRight: "Split Right"
-        case .splitDown: "Split Down"
+        case .splitRight: "Split Pane Right"
+        case .splitDown: "Split Pane Down"
         case .zoomPane: "Zoom Pane"
-        case .nextPane: "Select Next Pane"
-        case .previousPane: "Select Previous Pane"
+        case .nextPane: "Focus Next Pane"
+        case .previousPane: "Focus Previous Pane"
         case .equalizePanes: "Equalize Panes"
+        case .changeInterfaceStyle: "Change Interface Style…"
+        case .compactDensity: "Compact Density"
+        case .comfortableDensity: "Comfortable Density"
+        case .changeFontSize: "Change Terminal Font Size…"
+        case .toggleFontSmoothing: "Enable Terminal Font Smoothing"
+        case .toggleCopyOnSelection: "Set Copy on Select"
         }
     }
 
-    /// Titles that describe the action a toggle will take, for the palette.
+    /// The palette's wording: toggles describe the action they will take,
+    /// and commands that open a scope drop the ellipsis for a chevron.
     @MainActor
     func paletteTitle(_ preferences: Preferences) -> String {
         switch self {
         case .toggleVerticalTabs: preferences.verticalTabs ? "Switch to Horizontal Tabs" : "Switch to Vertical Tabs"
         case .togglePaneTitles: preferences.showPaneTitles ? "Hide Pane Titles" : "Show Pane Titles"
-        default: title.replacingOccurrences(of: "…", with: "")
+        case .importGhosttyThemes: "Migrate theme from Ghostty config"
+        default: opensScope ? title.replacingOccurrences(of: "…", with: "") : title
+        }
+    }
+
+    /// Commands that continue in the palette, shown with a trailing chevron.
+    var opensScope: Bool {
+        switch self {
+        case .switchSession, .renameSession, .renameTab, .chooseTheme, .goToDirectory, .addRemoteHost, .changeInterfaceStyle,
+             .changeFontSize: true
+        default: false
+        }
+    }
+
+    /// The current value the palette shows beside a command.
+    @MainActor
+    func paletteValue(_ model: WorkspaceModel) -> String? {
+        let preferences = model.preferences
+        switch self {
+        case .switchSession, .renameSession: return model.activeSession?.name
+        case .renameTab: return model.activeDeck.map { model.deckTitle($0) }
+        case .chooseTheme: return preferences.themeName
+        case .changeInterfaceStyle: return preferences.interfaceStyle.rawValue
+        case .changeFontSize: return "\(Int(preferences.fontSize)) pt"
+        case .toggleCopyOnSelection: return preferences.copyOnSelection ? "On" : "Off"
+        case .goToDirectory:
+            guard let cwd = model.info(model.focusedBlock)?.cwd, !cwd.isEmpty else { return nil }
+            return (cwd as NSString).abbreviatingWithTildeInPath
+        default: return nil
+        }
+    }
+
+    /// Whether a toggle-style command is the current setting.
+    @MainActor
+    func isChecked(_ preferences: Preferences) -> Bool {
+        switch self {
+        case .compactDensity: preferences.density == .compact
+        case .comfortableDensity: preferences.density == .comfortable
+        case .toggleFontSmoothing: preferences.fontOptions.thicken
+        default: false
+        }
+    }
+
+    /// The palette groups pane commands under a header.
+    var paletteSection: PaletteSection? {
+        switch self {
+        case .splitRight, .splitDown, .zoomPane, .nextPane, .previousPane, .equalizePanes: .pane
+        case .chooseTheme, .changeInterfaceStyle, .compactDensity, .comfortableDensity, .toggleVerticalTabs, .togglePaneTitles,
+             .changeFontSize, .toggleFontSmoothing, .toggleCopyOnSelection, .importGhosttyThemes, .settings: .appearance
+        default: nil
         }
     }
 
@@ -109,6 +167,11 @@ enum WorkspaceCommand: String, CaseIterable, Identifiable {
         case .zoomPane: "arrow.up.left.and.arrow.down.right"
         case .nextPane, .previousPane: "rectangle.2.swap"
         case .equalizePanes: "equal.square"
+        case .changeInterfaceStyle: "macwindow"
+        case .compactDensity, .comfortableDensity: "rectangle.split.2x2"
+        case .changeFontSize: "textformat.size"
+        case .toggleFontSmoothing: "bold"
+        case .toggleCopyOnSelection: "doc.on.clipboard"
         }
     }
 
@@ -162,7 +225,8 @@ enum WorkspaceCommand: String, CaseIterable, Identifiable {
         case .nextPane: KeyboardShortcut("]")
         case .previousPane: KeyboardShortcut("[")
         case .equalizePanes: KeyboardShortcut("=", modifiers: [.command, .control])
-        case .closeSession, .chooseTheme, .importGhosttyThemes, .addRemoteHost, .togglePaneTitles: nil
+        case .closeSession, .chooseTheme, .importGhosttyThemes, .addRemoteHost, .togglePaneTitles, .changeInterfaceStyle,
+             .compactDensity, .comfortableDensity, .changeFontSize, .toggleFontSmoothing, .toggleCopyOnSelection: nil
         }
     }
 
@@ -232,6 +296,24 @@ enum WorkspaceCommand: String, CaseIterable, Identifiable {
         case .nextPane: model?.cyclePane(1)
         case .previousPane: model?.cyclePane(-1)
         case .equalizePanes: model?.equalizePanes()
+        case .changeInterfaceStyle: model?.palette = .interfaceStyle
+        case .compactDensity: preferences.density = .compact
+        case .comfortableDensity: preferences.density = .comfortable
+        case .changeFontSize: model?.palette = .fontSize
+        case .toggleFontSmoothing: preferences.fontOptions.thicken.toggle()
+        case .toggleCopyOnSelection: preferences.copyOnSelection.toggle()
+        }
+    }
+}
+
+/// A header the palette draws above a group of commands.
+enum PaletteSection: String {
+    case pane = "Pane", appearance = "Appearance"
+
+    var symbol: String {
+        switch self {
+        case .pane: "square.grid.2x2"
+        case .appearance: "paintpalette"
         }
     }
 }

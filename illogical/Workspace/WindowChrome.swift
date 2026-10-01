@@ -30,7 +30,9 @@ struct WindowDragArea: NSViewRepresentable {
 struct WindowConfigurator: NSViewRepresentable {
     let model: WorkspaceModel
     let title: String
-    let theme: TerminalTheme
+    let colors: ChromeColors
+    /// Where the traffic lights centre vertically: the titlebar's height.
+    let titlebarHeight: CGFloat
     @Binding var isFullScreen: Bool
 
     func makeCoordinator() -> Coordinator { Coordinator(model: model, isFullScreen: $isFullScreen) }
@@ -43,7 +45,8 @@ struct WindowConfigurator: NSViewRepresentable {
 
     func updateNSView(_ view: WindowObserverView, context: Context) {
         context.coordinator.isFullScreen = $isFullScreen
-        context.coordinator.apply(title: title, theme: theme)
+        context.coordinator.titlebarHeight = titlebarHeight
+        context.coordinator.apply(title: title, colors: colors)
     }
 
     final class WindowObserverView: NSView {
@@ -58,10 +61,11 @@ struct WindowConfigurator: NSViewRepresentable {
     final class Coordinator {
         let model: WorkspaceModel
         var isFullScreen: Binding<Bool>
+        var titlebarHeight = Chrome.Titlebar.height { didSet { if titlebarHeight != oldValue { placeTrafficLights() } } }
         private weak var window: NSWindow?
         private var observers: [NSObjectProtocol] = []
         private var title = ""
-        private var theme: TerminalTheme?
+        private var colors: ChromeColors?
 
         init(model: WorkspaceModel, isFullScreen: Binding<Bool>) {
             self.model = model
@@ -106,47 +110,48 @@ struct WindowConfigurator: NSViewRepresentable {
                 },
                 // The window server only accepts a blur once the window is on screen.
                 center.addObserver(forName: NSWindow.didBecomeKeyNotification, object: window, queue: .main) { [weak self] _ in
-                    MainActor.assumeIsolated { self?.applyBlur();self?.centerTrafficLights() }
+                    MainActor.assumeIsolated { self?.applyBlur();self?.placeTrafficLights() }
                 },
                 // AppKit lays the titlebar out again whenever the window resizes.
                 center.addObserver(forName: NSWindow.didResizeNotification, object: window, queue: .main) { [weak self] _ in
-                    MainActor.assumeIsolated { self?.centerTrafficLights() }
+                    MainActor.assumeIsolated { self?.placeTrafficLights() }
                 },
             ]
-            DispatchQueue.main.async { [weak self] in self?.centerTrafficLights() }
-            let current = (title, theme)
+            DispatchQueue.main.async { [weak self] in self?.placeTrafficLights() }
+            let current = (title, colors)
             title = ""
-            theme = nil
-            if let currentTheme = current.1 { apply(title: current.0, theme: currentTheme) }
+            colors = nil
+            if let currentColors = current.1 { apply(title: current.0, colors: currentColors) }
         }
 
-        func apply(title: String, theme: TerminalTheme) {
-            guard let window else { self.title = title;self.theme = theme;return }
+        func apply(title: String, colors: ChromeColors) {
+            guard let window else { self.title = title;self.colors = colors;return }
             if window.title != title { window.title = title }
-            guard self.theme != theme else { return }
-            self.theme = theme
+            guard self.colors != colors else { return }
+            self.colors = colors
+            let theme = colors.theme
             let fullScreen = window.styleMask.contains(.fullScreen)
             let opaque = fullScreen || theme.effectiveBackgroundOpacity >= 1
             window.isOpaque = opaque
-            window.backgroundColor = opaque ? NSColor(hex: theme.background) : .clear
+            window.backgroundColor = opaque ? NSColor(hex: colors.titlebarHex, colorspace: colors.colorspace) : .clear
             applyBlur()
         }
 
         private func applyBlur() {
-            guard let window, let theme else { return }
+            guard let window, let theme = colors?.theme else { return }
             let translucent = !window.styleMask.contains(.fullScreen) && theme.effectiveBackgroundOpacity < 1
             WindowBlur.apply(radius: translucent ? theme.backgroundBlur ?? 0 : 0, to: window)
         }
 
-        private func centerTrafficLights() {
-            if let window { TrafficLights.center(in: window, height: Chrome.Titlebar.height) }
+        private func placeTrafficLights() {
+            if let window { TrafficLights.place(in: window, titlebarHeight: titlebarHeight) }
         }
 
         private func fullScreenChanged() {
             guard let window else { return }
             isFullScreen.wrappedValue = window.styleMask.contains(.fullScreen)
-            centerTrafficLights()
-            if let theme { self.theme = nil;apply(title: window.title, theme: theme) }
+            placeTrafficLights()
+            if let colors { self.colors = nil;apply(title: window.title, colors: colors) }
         }
 
         /// A sheet like Ghostty's: Close is the default button, Cancel answers Escape.
@@ -162,20 +167,31 @@ struct WindowConfigurator: NSViewRepresentable {
     }
 }
 
-/// Centres the close, minimise and zoom buttons vertically in the custom
-/// titlebar by growing their container, as Electron's trafficLightPosition
-/// does. The buttons keep their system x positions.
+/// Puts the close, minimise and zoom buttons where the design has them:
+/// centred vertically in the custom titlebar (by growing their container,
+/// as Electron's trafficLightPosition does) at fixed horizontal centres.
 enum TrafficLights {
+    private static let buttons: [NSWindow.ButtonType] = [.closeButton, .miniaturizeButton, .zoomButton]
+
     @MainActor
-    static func center(in window: NSWindow, height: CGFloat) {
+    static func place(in window: NSWindow, titlebarHeight: CGFloat) {
         guard !window.styleMask.contains(.fullScreen), let close = window.standardWindowButton(.closeButton),
               let container = close.superview?.superview, let frameView = container.superview else { return }
         var frame = container.frame
         let top = frameView.bounds.height
-        guard frame.height != height || frame.maxY != top else { return }
-        frame.size.height = height
-        frame.origin.y = top - height
-        container.frame = frame
+        if frame.height != titlebarHeight || frame.maxY != top {
+            frame.size.height = titlebarHeight
+            frame.origin.y = top - titlebarHeight
+            container.frame = frame
+        }
+        for (index, type) in buttons.enumerated() {
+            guard let button = window.standardWindowButton(type), let superview = button.superview else { continue }
+            let centre = NSPoint(x: Chrome.Titlebar.trafficLightX + CGFloat(index) * Chrome.Titlebar.trafficLightSpacing,
+                                 y: top - titlebarHeight / 2)
+            let local = superview.convert(centre, from: frameView)
+            let origin = NSPoint(x: (local.x - button.frame.width / 2).rounded(), y: (local.y - button.frame.height / 2).rounded())
+            if button.frame.origin != origin { button.setFrameOrigin(origin) }
+        }
     }
 }
 

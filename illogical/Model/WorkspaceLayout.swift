@@ -153,26 +153,31 @@ extension ChildProcess {
     }
 }
 
-/// What a tab or pane is running, drawn as a small badge.
+/// What a tab or pane is running, drawn as a small badge. Programs without
+/// their own icon, lazygit and ssh included, show the shell's.
 enum ProcessBadge: Equatable {
-    case shell, neovim, vim, claude, codex, fx, git, ssh, monitor, python, node
-    case generic(String)
+    case shell, neovim, vim, claude, codex, fx, monitor
 
     init(program: String) {
-        let name = (program as NSString).lastPathComponent.lowercased()
-        switch name {
-        case "zsh", "bash", "fish", "sh", "nu", "-zsh", "-bash", "-fish", "login": self = .shell
+        switch (program as NSString).lastPathComponent.lowercased() {
         case "nvim": self = .neovim
         case "vim", "vi": self = .vim
         case "claude", "cc": self = .claude
         case "codex": self = .codex
         case "fx": self = .fx
-        case "git", "lazygit", "lg", "tig": self = .git
-        case "ssh", "mosh", "mosh-client", "et": self = .ssh
         case "top", "htop", "btop", "btm": self = .monitor
-        case "node", "bun", "deno": self = .node
-        default:
-            if name.hasPrefix("python") { self = .python } else { self = name.isEmpty ? .shell : .generic(name) }
+        default: self = .shell
+        }
+    }
+
+    /// How strongly a tab's badge prefers this process over its others:
+    /// agents, then editors, then monitors, then shells.
+    var specificity: Int {
+        switch self {
+        case .claude, .codex, .fx: 3
+        case .neovim, .vim: 2
+        case .monitor: 1
+        case .shell: 0
         }
     }
 
@@ -182,7 +187,6 @@ enum ProcessBadge: Equatable {
         let words = title.lowercased().split { !$0.isLetter && !$0.isNumber }
         for word in words {
             let badge = ProcessBadge(program: String(word))
-            if case .generic = badge { continue }
             if badge != .shell { self = badge;return }
         }
         return nil

@@ -2,9 +2,9 @@ import AppKit
 import SwiftUI
 
 /// A borderless AppKit text field for palettes and search bars. It reports
-/// Return (with whether Shift was held), Escape, the arrow keys and
-/// Command-Delete, and can
-/// take keyboard focus whenever `focusToken` changes.
+/// Return (with whether Shift was held), Escape, the arrow keys,
+/// Command-Delete and Command-1 to 9, and can take keyboard focus whenever
+/// `focusToken` changes.
 struct NativeSearchField: NSViewRepresentable {
     @Binding var text: String
     var placeholder: String
@@ -17,6 +17,9 @@ struct NativeSearchField: NSViewRepresentable {
     var onFocus: () -> Void = {}
     /// Command-Delete; return true to consume it instead of editing the text.
     var onDeleteCommand: (() -> Bool)?
+    /// Command-1 to 9 while the field has focus; return true to consume it
+    /// before the menus see it.
+    var onCommandDigit: ((Int) -> Bool)?
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -37,6 +40,7 @@ struct NativeSearchField: NSViewRepresentable {
         field.placeholderString = placeholder
         field.font = .systemFont(ofSize: size)
         field.autoFocus = autoFocus
+        field.onCommandDigit = onCommandDigit
         if field.focusToken != focusToken {
             field.focusToken = focusToken
             if autoFocus { field.requestFocus() }
@@ -71,6 +75,16 @@ struct NativeSearchField: NSViewRepresentable {
     final class Field: NSTextField {
         var autoFocus = true
         var focusToken: UUID?
+        var onCommandDigit: ((Int) -> Bool)?
+
+        override func performKeyEquivalent(with event: NSEvent) -> Bool {
+            if let onCommandDigit, currentEditor() != nil,
+               event.modifierFlags.intersection([.command, .control, .option, .shift]) == .command,
+               let digit = event.charactersIgnoringModifiers.flatMap(Int.init), (1...9).contains(digit), onCommandDigit(digit) {
+                return true
+            }
+            return super.performKeyEquivalent(with: event)
+        }
 
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()

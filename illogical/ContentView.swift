@@ -37,6 +37,7 @@ struct WorkspaceView: View {
     @State private var isFullScreen = false
     private var preferences: Preferences { model.preferences }
     private var theme: TerminalTheme { preferences.theme }
+    private var colors: ChromeColors { preferences.colors }
     /// Translucent themes show the desktop through the chrome and panes.
     private var backgroundOpacity: Double { isFullScreen ? 1 : theme.effectiveBackgroundOpacity }
 
@@ -44,16 +45,17 @@ struct WorkspaceView: View {
         ZStack(alignment: .top) {
             if preferences.verticalTabs {
                 HStack(spacing: 0) {
-                    VStack(spacing: 0) {
-                        WorkspaceTitlebar(model: model, isFullScreen: isFullScreen)
-                        WorkspaceSidebar(model: model)
-                    }
-                    .frame(width: Chrome.Sidebar.width)
+                    WorkspaceSidebar(model: model, isFullScreen: isFullScreen)
+                        .frame(width: Chrome.Sidebar.width)
                     WorkspaceArea(model: model)
                 }
             } else {
                 VStack(spacing: 0) {
                     WorkspaceTitlebar(model: model, isFullScreen: isFullScreen)
+                    // Compact panes meet the titlebar at a hairline; islands float below it.
+                    if preferences.density == .compact {
+                        Rectangle().fill(colors.hairline).frame(height: Chrome.Titlebar.separator)
+                    }
                     WorkspaceArea(model: model)
                 }
             }
@@ -62,14 +64,16 @@ struct WorkspaceView: View {
         .overlay { if let mode = model.palette { PaletteOverlay(model: model, mode: mode) } }
         .overlay(alignment: .bottom) { NoticeBanner(model: model) }
         .backgroundPreferenceValue(PaneFrames.self) { panes in
-            WindowBackground(theme: theme, style: preferences.interfaceStyle, opacity: backgroundOpacity, panes: panes)
+            WindowBackground(colors: colors, style: preferences.interfaceStyle, opacity: backgroundOpacity, panes: panes)
         }
-        .foregroundStyle(theme.text)
-        .tint(theme.tint)
+        .foregroundStyle(colors.primary)
+        .tint(colors.accentText)
         .preferredColorScheme(theme.isLight ? .light : .dark)
         .frame(minWidth: 760, minHeight: 480)
         .ignoresSafeArea()
-        .background(WindowConfigurator(model: model, title: model.windowTitle, theme: theme, isFullScreen: $isFullScreen))
+        .background(WindowConfigurator(model: model, title: model.windowTitle, colors: colors,
+                                       titlebarHeight: preferences.verticalTabs ? Chrome.Titlebar.sidebarHeight : Chrome.Titlebar.height,
+                                       isFullScreen: $isFullScreen))
         .sheet(item: Binding(get: { model.rename }, set: { if $0 == nil { model.cancelRename() } })) { request in
             RenameSheet(request: request, onCommit: model.commitRename, onCancel: model.cancelRename)
         }
@@ -79,7 +83,7 @@ struct WorkspaceView: View {
         }
         .sheet(isPresented: Binding(get: { !model.migration.isEmpty }, set: { if !$0 { model.migration = [] } }),
                onDismiss: { model.requestTerminalFocus() }) {
-            MigrationSheet(themes: model.migration, tint: theme.tint) { adopt in
+            MigrationSheet(themes: model.migration, tint: colors.accentText) { adopt in
                 if adopt { preferences.adopt(model.migration) }
                 model.migration = []
             }
@@ -109,6 +113,7 @@ private struct WorkspaceArea: View {
     }
 
     @ViewBuilder private var content: some View {
+        let preferences = model.preferences
         if let deck = model.activeDeck {
             Group {
                 if let zoomed = deck.zoomed, deck.root.contains(zoomed) {
@@ -117,7 +122,8 @@ private struct WorkspaceArea: View {
                     LayoutView(model: model, node: deck.root, deck: deck.id, host: model.selectedHost, preview: false)
                 }
             }
-            .padding(model.preferences.density == .comfortable ? Chrome.Pane.comfortablePadding : 0)
+            .modifier(TerminalIsland(colors: preferences.colors, active: preferences.verticalTabs && preferences.density == .compact))
+            .padding(Chrome.Pane.areaInsets(density: preferences.density, verticalTabs: preferences.verticalTabs))
             .overlay(alignment: .bottom) {
                 if let status = model.statuses[model.selectedHost] { StatusCapsule(text: status) }
             }
@@ -127,6 +133,24 @@ private struct WorkspaceArea: View {
                 Text(model.statuses[model.selectedHost] ?? "Opening a terminal…").font(Chrome.EmptyState.messageFont)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+}
+
+/// With vertical tabs, compact panes share one rounded island beside the
+/// sidebar.
+private struct TerminalIsland: ViewModifier {
+    let colors: ChromeColors
+    let active: Bool
+
+    func body(content: Content) -> some View {
+        if active {
+            let shape = RoundedRectangle(cornerRadius: Chrome.Sidebar.islandRadius, style: .continuous)
+            content
+                .clipShape(shape)
+                .overlay { shape.inset(by: Chrome.Pane.strokeWidth / 2).stroke(colors.islandStroke, lineWidth: Chrome.Pane.strokeWidth) }
+        } else {
+            content
         }
     }
 }
@@ -168,17 +192,17 @@ struct PaneFrames: PreferenceKey {
 }
 
 private struct WindowBackground: View {
-    let theme: TerminalTheme
+    let colors: ChromeColors
     let style: InterfaceStyle
     let opacity: Double
     let panes: [PaneFrames.Frame]
 
     var body: some View {
         if opacity >= 1 {
-            theme.chromeBackground(style)
+            colors.chromeBackground(style)
         } else {
             GeometryReader { proxy in
-                theme.chromeBackground(style)
+                colors.chromeBackground(style)
                     .opacity(opacity)
                     .mask {
                         Rectangle()

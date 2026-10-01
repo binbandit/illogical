@@ -38,16 +38,18 @@ final class Preferences {
     var theme: TerminalTheme { themes.first { $0.name == themeName } ?? .merinoDark }
 
     private init() {
-        themeName = defaults.string(forKey: Key.theme) ?? TerminalTheme.merinoDark.name
+        themeName = Self.storedTheme(Key.theme, in: defaults) ?? TerminalTheme.merinoDark.name
         followSystemAppearance = defaults.bool(forKey: Key.followSystemAppearance)
-        lightThemeName = defaults.string(forKey: Key.lightTheme) ?? TerminalTheme.merinoLight.name
-        darkThemeName = defaults.string(forKey: Key.darkTheme) ?? TerminalTheme.merinoDark.name
+        lightThemeName = Self.storedTheme(Key.lightTheme, in: defaults) ?? TerminalTheme.merinoLight.name
+        darkThemeName = Self.storedTheme(Key.darkTheme, in: defaults) ?? TerminalTheme.merinoDark.name
         importedThemes = Self.load([TerminalTheme].self, from: defaults, forKey: Key.importedThemes) ?? []
         interfaceStyle = defaults.string(forKey: Key.interfaceStyle).flatMap(InterfaceStyle.init) ?? .themed
         density = defaults.string(forKey: Key.density).flatMap(Density.init) ?? .compact
         verticalTabs = defaults.bool(forKey: Key.verticalTabs)
-        showPaneTitles = defaults.object(forKey: Key.showPaneTitles) as? Bool ?? true
-        unfocusedPaneOpacity = defaults.object(forKey: Key.unfocusedPaneOpacity) as? Double ?? 0.85
+        showPaneTitles = defaults.bool(forKey: Key.showPaneTitles)
+        // Unfocused panes take the chrome's darker surface instead; this
+        // Ghostty fade is opt-in through the setting or a Ghostty import.
+        unfocusedPaneOpacity = defaults.object(forKey: Key.unfocusedPaneOpacity) as? Double ?? 1
         fontName = defaults.string(forKey: Key.fontName) ?? TerminalFontOptions.defaultFontName
         fontSize = defaults.object(forKey: Key.fontSize) as? Double ?? Double(TerminalFontOptions.defaultFontSize)
         fontOptions = Self.load(TerminalFontOptions.self, from: defaults, forKey: Key.fontOptions) ?? .defaults
@@ -103,6 +105,11 @@ final class Preferences {
 
     private func save<Value: Encodable>(_ value: Value, forKey key: String) {
         if let data = try? JSONEncoder().encode(value) { defaults.set(data, forKey: key) }
+    }
+
+    /// A saved theme name, following built-in themes that were renamed.
+    private static func storedTheme(_ key: String, in defaults: UserDefaults) -> String? {
+        defaults.string(forKey: key).map { TerminalTheme.renamed[$0] ?? $0 }
     }
 
     private static func load<Value: Decodable>(_ type: Value.Type, from defaults: UserDefaults, forKey key: String) -> Value? {

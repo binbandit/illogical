@@ -51,6 +51,20 @@ struct SettingsView: View {
                         Text("\(Int(preferences.fontSize)) pt").monospacedDigit().frame(width: 42, alignment: .trailing)
                     }
                 }
+                LabeledContent("Line height") {
+                    Stepper(value: lineHeight, in: Self.lineHeights, step: 5) {
+                        Text(lineHeight.wrappedValue == 0 ? "Font default" : "\(lineHeight.wrappedValue > 0 ? "+" : "")\(Int(lineHeight.wrappedValue))%")
+                            .monospacedDigit()
+                    }
+                }
+                .help("Extra space between lines, like Ghostty's adjust-cell-height.")
+                Picker("Cursor", selection: $preferences.fontOptions.cursorStyle) {
+                    Text("Block").tag(TerminalCursorStyle.block)
+                    Text("Bar").tag(TerminalCursorStyle.bar)
+                    Text("Underline").tag(TerminalCursorStyle.underline)
+                }
+                .pickerStyle(.segmented)
+                Toggle("Blinking cursor", isOn: $preferences.fontOptions.cursorBlink)
                 Toggle("Thicken text", isOn: $preferences.fontOptions.thicken)
                 Button("Use Ghostty Font Settings") {
                     do { try preferences.importGhosttyFont() } catch { importError = error.localizedDescription }
@@ -76,7 +90,7 @@ struct SettingsView: View {
         .frame(width: 520, height: 600)
         .sheet(isPresented: $showAddHost) { AddHostSheet() }
         .sheet(isPresented: Binding(get: { !importedThemes.isEmpty }, set: { if !$0 { importedThemes = [] } })) {
-            MigrationSheet(themes: importedThemes, tint: preferences.theme.tint) { adopt in
+            MigrationSheet(themes: importedThemes, tint: preferences.colors.accentText) { adopt in
                 if adopt { preferences.adopt(importedThemes) }
                 importedThemes = []
             }
@@ -85,6 +99,19 @@ struct SettingsView: View {
             Button("OK") { importError = nil }
         } message: {
             Text(importError ?? "")
+        }
+    }
+
+    private static let lineHeights: ClosedRange<Double> = -20...100
+
+    /// The line-height adjustment in percent. A pixel adjustment imported
+    /// from Ghostty reads as the font default until changed here.
+    private var lineHeight: Binding<Double> {
+        Binding {
+            if case .percent(let fraction) = preferences.fontOptions.cellHeight { return (fraction * 100).rounded() }
+            return 0
+        } set: { percent in
+            preferences.fontOptions.cellHeight = percent == 0 ? .none : .percent(percent / 100)
         }
     }
 
@@ -224,9 +251,9 @@ private struct ThemePreview: View {
             }
             Text(theme.name).font(.system(size: 10, weight: .medium)).lineLimit(1).padding(.top, 10)
         }
-        .foregroundStyle(theme.text)
+        .foregroundStyle(Color(hex: theme.foreground))
         .padding(18)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(theme.color.opacity(theme.effectiveBackgroundOpacity), in: RoundedRectangle(cornerRadius: 12))
+        .background(Color(hex: theme.background).opacity(theme.effectiveBackgroundOpacity), in: RoundedRectangle(cornerRadius: 12))
     }
 }

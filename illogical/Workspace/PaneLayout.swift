@@ -57,8 +57,12 @@ private struct SplitView: View {
     private func divider(extent: CGFloat, ratio: Double, size: CGSize) -> some View {
         let thickness = max(Chrome.Pane.dividerHitWidth, gap)
         let offset = extent * ratio + gap / 2
-        return Rectangle()
-            .fill(model.preferences.density == .compact ? model.preferences.theme.border : .clear)
+        let line = model.preferences.density == .compact ? model.preferences.colors.hairline : .clear
+        return Color.clear
+            .overlay {
+                Rectangle().fill(line)
+                    .frame(width: sideBySide ? Chrome.Pane.compactGap : nil, height: sideBySide ? nil : Chrome.Pane.compactGap)
+            }
             .frame(width: sideBySide ? thickness : nil, height: sideBySide ? nil : thickness)
             .contentShape(Rectangle())
             .position(x: sideBySide ? offset : size.width / 2, y: sideBySide ? size.height / 2 : offset)
@@ -87,15 +91,16 @@ struct TerminalPane: View {
     let block: String
     let host: String
     let preview: Bool
-    @State private var hovering = false
     @State private var cellSize = CGSize(width: 8, height: 19)
     @State private var paneSize = CGSize(width: 1, height: 1)
 
     private var preferences: Preferences { model.preferences }
     private var theme: TerminalTheme { preferences.theme }
+    private var colors: ChromeColors { preferences.colors }
+    private var islands: Bool { preferences.density == .comfortable }
     private var radius: CGFloat {
         if preview { return Chrome.Pane.previewRadius }
-        return preferences.density == .comfortable ? Chrome.Pane.comfortableRadius : 0
+        return islands ? Chrome.Pane.comfortableRadius : 0
     }
     private var showsTitle: Bool { !preview && preferences.showPaneTitles }
     private var isFocused: Bool { !preview && model.focusedBlock == block }
@@ -103,35 +108,50 @@ struct TerminalPane: View {
     private var hasKeyboardFocus: Bool {
         isFocused && model.peek == 0 && model.searchFocusedBlock == nil && !model.hasOverlay
     }
-    /// Unfocused panes of a split tab are dimmed, like Ghostty's unfocused splits.
-    private var isDimmed: Bool {
-        !preview && !isFocused && (model.activeDeck?.root.blocks.count ?? 0) > 1 && preferences.unfocusedPaneOpacity < 1
+    /// Panes of a split tab that do not have focus sit a shade darker.
+    private var isUnfocusedSplit: Bool {
+        !preview && !isFocused && (model.activeDeck?.root.blocks.count ?? 0) > 1
     }
+    /// Ghostty's optional `unfocused-split-opacity` fade, on top of the shade.
+    private var fadeOpacity: Double { isUnfocusedSplit ? preferences.unfocusedPaneOpacity : 1 }
+    private var searchDimmed: Bool { !preview && model.searches[block]?.query.isEmpty == false }
 
     var body: some View {
-        VStack(spacing: 0) {
-            if showsTitle { PaneTitleRow(model: model, block: block, host: host, controlsVisible: hovering) }
+        let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
+        ZStack(alignment: .top) {
             surface
+                .overlay {
+                    if isUnfocusedSplit { Color.black.opacity(colors.unfocusedShade).allowsHitTesting(false) }
+                }
+                .overlay {
+                    if searchDimmed { Color.black.opacity(Chrome.Search.paneDim).allowsHitTesting(false).transition(.opacity) }
+                }
+                .animation(Chrome.Search.dimAnimation, value: searchDimmed)
+                .padding(.top, showsTitle ? Chrome.PaneTitle.height - Chrome.PaneTitle.terminalOverlap : 0)
+            if showsTitle {
+                PaneTitleRow(model: model, block: block, host: host,
+                             background: isUnfocusedSplit ? colors.unfocusedPane : colors.terminal.opacity(theme.effectiveBackgroundOpacity))
+            }
         }
-        .background(theme.effectiveBackgroundOpacity == 1 ? theme.color : .clear)
+        .background(theme.effectiveBackgroundOpacity == 1 ? colors.terminal : .clear)
         .overlay {
-            if isDimmed { theme.color.opacity(1 - preferences.unfocusedPaneOpacity).allowsHitTesting(false) }
+            if fadeOpacity < 1 { colors.terminal.opacity(1 - fadeOpacity).allowsHitTesting(false) }
         }
-        .clipShape(RoundedRectangle(cornerRadius: radius))
-        .overlay(
-            RoundedRectangle(cornerRadius: radius)
-                .stroke(theme.text.opacity(isFocused ? Chrome.Pane.focusedBorderOpacity : Chrome.Pane.unfocusedBorderOpacity),
-                        lineWidth: Chrome.Pane.borderWidth)
-        )
+        .clipShape(shape)
+        .overlay {
+            if islands && !preview {
+                shape.inset(by: Chrome.Pane.strokeWidth / 2)
+                    .stroke(isFocused ? colors.focusedIslandStroke : colors.islandStroke, lineWidth: Chrome.Pane.strokeWidth)
+            }
+        }
         .overlay {
             if !preview, let search = model.searches[block] {
                 TerminalSearchOverlay(model: model, search: search, block: block, cell: cellSize,
-                                      titleHeight: showsTitle ? Chrome.PaneTitle.height : 0)
+                                      titleHeight: showsTitle ? Chrome.PaneTitle.height - Chrome.PaneTitle.terminalOverlap : 0)
                     .allowsHitTesting(model.peek == 0)
             }
         }
         .anchorPreference(key: PaneFrames.self, value: .bounds) { preview ? [] : [PaneFrames.Frame(anchor: $0, radius: radius)] }
-        .onHover { hovering = $0 }
         .onGeometryChange(for: CGSize.self) { $0.size } action: { paneSize = $0 }
         .onDrop(of: [UTType.plainText], isTargeted: nil) { providers, location in dropPane(providers, at: location) }
     }
@@ -177,58 +197,54 @@ struct TerminalPane: View {
     }
 }
 
-/// The optional thin row above a pane: badge, title and pane controls.
+/// The optional row above a pane: the process glyph, the title and the
+/// pane controls, on the pane's own surface.
 private struct PaneTitleRow: View {
     let model: WorkspaceModel
     let block: String
     let host: String
-    let controlsVisible: Bool
+    let background: Color
 
     private var info: BlockInfo? { model.info(block, host: host) }
-    private var theme: TerminalTheme { model.preferences.theme }
+    private var colors: ChromeColors { model.preferences.colors }
+    /// Closing the only pane closes its tab, so that control is muted.
+    private var isOnlyPane: Bool { (model.activeDeck?.root.blocks.count ?? 1) <= 1 }
 
     var body: some View {
-        HStack(spacing: Chrome.PaneTitle.spacing) {
+        HStack(spacing: Chrome.PaneTitle.glyphTitleSpacing) {
             ProcessGlyph(badge: model.processBadge(block, host: host))
-                .opacity(Chrome.PaneTitle.titleOpacity)
-            Text(info?.displayTitle ?? "Terminal")
-                .font(Chrome.font(Chrome.PaneTitle.titleSize, .semibold))
+            Text(info?.displayTitle ?? "shell")
+                .font(Chrome.PaneTitle.titleFont)
                 .lineLimit(1)
-                .opacity(Chrome.PaneTitle.titleOpacity)
-            if info?.parked == true {
-                Image(systemName: "moon.zzz")
-                    .font(Chrome.font(Chrome.PaneTitle.parkedSymbolSize))
-                    .opacity(0.35)
-                    .help("Emulator parked. Your process is still running.")
-            }
-            Spacer(minLength: 4)
-            HStack(spacing: Chrome.PaneTitle.spacing) {
-                control("rectangle.split.2x1", "Split Right") { model.split(.horizontal, block: block) }
-                control("rectangle.split.1x2", "Split Down") { model.split(.vertical, block: block) }
+                .accessibilityHint(info?.parked == true ? "Emulator parked. Your process is still running." : "")
+            Spacer(minLength: Chrome.PaneTitle.glyphTitleSpacing)
+            HStack(spacing: 0) {
+                control("rectangle.split.2x1", "Split Pane Right") { model.split(.horizontal, block: block) }
+                control("rectangle.split.1x2", "Split Pane Down") { model.split(.vertical, block: block) }
                 control("arrow.up.left.and.arrow.down.right", "Zoom Pane") { model.zoom(block) }
-                control("xmark", "Close Pane") { model.closePane(block) }
+                control("xmark", "Close Pane", muted: isOnlyPane) { model.closePane(block) }
             }
-            .opacity(controlsVisible ? 1 : 0)
-            .allowsHitTesting(controlsVisible)
-            .accessibilityHidden(!controlsVisible)
         }
-        .padding(.horizontal, Chrome.PaneTitle.horizontalPadding)
+        .foregroundStyle(colors.primary)
+        .padding(.leading, Chrome.PaneTitle.leadingInset)
+        .padding(.trailing, Chrome.PaneTitle.lastControlCentreInset - Chrome.PaneTitle.controlPitch / 2)
         .frame(height: Chrome.PaneTitle.height)
-        .background(theme.color.opacity(theme.effectiveBackgroundOpacity))
+        .background(background)
         .contentShape(Rectangle())
         .allowsHitTesting(model.peek == 0)
         .onTapGesture { model.focus(block) }
         .onDrag { NSItemProvider(object: block as NSString) }
     }
 
-    private func control(_ symbol: String, _ label: String, action: @escaping () -> Void) -> some View {
+    private func control(_ symbol: String, _ label: String, muted: Bool = false, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: symbol)
                 .font(Chrome.font(Chrome.PaneTitle.controlSymbolSize))
-                .frame(width: Chrome.PaneTitle.control.width, height: Chrome.PaneTitle.control.height)
+                .foregroundStyle(muted ? colors.disabledControl : colors.control)
+                .frame(width: Chrome.PaneTitle.controlPitch, height: Chrome.PaneTitle.height)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .opacity(Chrome.PaneTitle.controlOpacity)
         .help(label)
         .accessibilityLabel(label)
     }
