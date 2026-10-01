@@ -38,7 +38,7 @@ enum TerminalCursorStyle: Int, Codable, Hashable {
 }
 
 /// How 8-bit terminal colors are interpreted, like Ghostty's `window-colorspace`.
-enum TerminalColorspace: String, Codable, Hashable {
+nonisolated enum TerminalColorspace: String, Codable, Hashable, Sendable {
     case srgb
     case displayP3 = "display-p3"
 }

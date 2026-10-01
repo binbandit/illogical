@@ -354,10 +354,15 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         static func belowText(_ z: Int32) -> Bool { z >= Int32.min / 2 && z < 0 }
         static func aboveText(_ z: Int32) -> Bool { z >= 0 }
     }
+    /// The current match is yellow with dark text whatever the theme; other
+    /// matches only lift their background a little, keeping their text.
     private enum SearchColors {
-        static let selectedBackground: UInt32 = 0xe3ba64, selectedForeground: UInt32 = 0x2b2314
-        static let matchBackground: UInt32 = 0x81714d, matchForeground: UInt32 = 0xffffff
+        static let selectedBackground: UInt32 = 0xddd212, selectedForeground: UInt32 = 0x1a1a10
+        static let matchLift = 0.15
     }
+    /// Without a theme selection colour, selected text keeps its colour over
+    /// a subtle lift of the background toward the foreground.
+    private static let selectionLift = 0.1
     /// Runs of ligature symbols are shaped together up to this length.
     private static let maximumOperatorRun = 24
 
@@ -703,12 +708,12 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                               windowForeground: frame.foreground, windowBackground: frame.background)
             }
             if flags.contains(.selected) {
-                background = theme.selectionBackground.map(resolved) ?? theme.accent
-                foreground = theme.selectionForeground.map(resolved) ?? (theme.isLight ? 0xffffff : 0x15191f)
+                background = theme.selectionBackground.map(resolved) ?? background.mixed(with: frame.foreground, by: Self.selectionLift)
+                foreground = theme.selectionForeground.map(resolved) ?? foreground
             } else if flags.contains(.searchSelected) {
                 background = SearchColors.selectedBackground; foreground = SearchColors.selectedForeground
             } else if flags.contains(.searchMatch) {
-                background = SearchColors.matchBackground; foreground = SearchColors.matchForeground
+                background = background.mixed(with: frame.foreground, by: SearchColors.matchLift)
             }
             let underCursor = blockCursor && cell.row == frame.cursorRow
                 && Int(cell.column) >= Int(frame.cursorColumn) && Int(cell.column) < Int(frame.cursorColumn) + cursorWidth

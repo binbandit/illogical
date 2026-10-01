@@ -20,6 +20,7 @@ nonisolated struct TerminalTheme: Codable, Identifiable, Equatable, Sendable {
     var name: String
     var background: UInt32
     var foreground: UInt32
+    /// The cursor colour.
     var accent: UInt32
     var ansi: [UInt32]
     var isLight: Bool
@@ -34,6 +35,11 @@ nonisolated struct TerminalTheme: Codable, Identifiable, Equatable, Sendable {
     var backgroundOpacityCells: Bool? = nil
     /// Blur radius behind a translucent window, like Ghostty's `background-blur`.
     var backgroundBlur: Int? = nil
+    /// The interface accent (selected rows, focused pane stroke) when it
+    /// differs from the cursor colour.
+    var tint: UInt32? = nil
+
+    var chromeAccent: UInt32 { tint ?? accent }
 
     var palette: [UInt32] {
         var values = Array(ansi.prefix(16))
@@ -52,19 +58,21 @@ nonisolated struct TerminalTheme: Codable, Identifiable, Equatable, Sendable {
         guard let opacity = backgroundOpacity, opacity.isFinite else { return 1 }
         return min(1, max(0, opacity))
     }
-    var color: Color { Color(hex: background) }
-    var text: Color { Color(hex: foreground) }
-    var tint: Color { Color(hex: accent) }
-    var chrome: Color { Color(hex: background).mix(with: isLight ? .black : .white, by: isLight ? 0.025 : 0.035) }
-    var border: Color { text.opacity(isLight ? 0.12 : 0.11) }
 
     static let darkANSI: [UInt32] = [0x202124, 0xeb777b, 0x8fbc8f, 0xe3c184, 0x8daeda, 0xbc9bd6, 0x89c3ca, 0xdadce2, 0x6f747d, 0xf3999c, 0xa7d4a4, 0xf1d8a2, 0xaec7ed, 0xd2b6e7, 0xa4d7dc, 0xf2f3f5]
     static let lightANSI: [UInt32] = [0x41454e, 0xa54655, 0x517456, 0x927136, 0x4b70a8, 0x885ba7, 0x407b83, 0xd5d9df, 0x747987, 0xbc5365, 0x628a62, 0xac843c, 0x6086bc, 0x9a70b9, 0x5c949c, 0xf9f9fc]
-    static let merinoDark = TerminalTheme(name: "Merino Dark", background: 0x1d1e20, foreground: 0xdcdde1, accent: 0x9db9df, ansi: darkANSI, isLight: false)
-    static let merinoLight = TerminalTheme(name: "Merino Light", background: 0xf7f7fa, foreground: 0x454650, accent: 0x6b84b8, ansi: lightANSI, isLight: true)
+    // Measured: Merino Dark's surface and interface accent. Light themes
+    // select in system blue. Cursors keep a colour readable on the surface.
+    static let merinoDark = TerminalTheme(name: "Merino Dark", background: 0x101216, foreground: 0xdcdde1, accent: 0x9db9df, ansi: darkANSI,
+                                          isLight: false, tint: 0x2657b3)
+    static let merinoLight = TerminalTheme(name: "Merino Light", background: 0xf7f7fa, foreground: 0x454650, accent: 0x6b84b8, ansi: lightANSI,
+                                           isLight: true, tint: 0x0a7aff)
+    /// Built-in themes that earlier releases saved under another name.
+    static let renamed = ["Oxidized Library": "Oxblood Library"]
 
-    // The names are documented in previews; colors are our reconstructions.
-    // Imported Ghostty themes retain their actual configured color values.
+    // The names are documented in previews; colors are our reconstructions
+    // except where marked measured. Imported Ghostty themes retain their
+    // actual configured color values.
     static let builtins: [TerminalTheme] = {
         let dark: [(String, UInt32, UInt32, UInt32)] = [
             ("Abyssal Trench",0x111e2b,0xc9dce6,0x82bec8), ("Basalt Shore",0x212326,0xd1d3d5,0xadb7c2),
@@ -74,12 +82,14 @@ nonisolated struct TerminalTheme: Codable, Identifiable, Equatable, Sendable {
             ("Ink Meridian",0x161b27,0xd0d8e8,0x89a6d8), ("Juniper Smoke",0x1b2522,0xcbded4,0x92b7a2),
             ("Midnight Tundra",0x171e25,0xcbd7df,0x8bacbd), ("Misty Forest",0x1a2625,0xc7dcd2,0x9abdaa),
             ("Moss Cathedral",0x20271d,0xd4ddc8,0xb4c69a), ("Neon Arcade",0x211831,0xddd0ee,0xc7a3ef),
-            ("Nocturne Rose",0x281e28,0xe0cbd9,0xd6a2bd), ("Oxidized Library",0x24271e,0xd4d8bd,0xb4bd8d),
+            ("Nocturne Rose",0x281e28,0xe0cbd9,0xd6a2bd), ("Oxblood Library",0x271b1c,0xe2d0cd,0xc27a72),
             ("Petrol Lagoon",0x132a30,0xc5dfdf,0x8ec4c5), ("Phosphor Archive",0x14231c,0xbfdec8,0x8dcaa2),
             ("Polar Aurora",0x17252c,0xcbdfe6,0x92c3d6), ("Roasted Umber",0x28221e,0xe1d5c6,0xc9ad89),
             ("Saffron Nightfall",0x29241c,0xe1d5b4,0xe2c27a), ("Silver Point Dark",0x25252a,0xdad9e1,0xb0afd0),
             ("Sonoran Dusk",0x2b2328,0xe4d0d3,0xd9aaa6), ("Static Noir",0x171719,0xd8d8dd,0xb5b5cc),
-            ("Velvet Dusk",0x291f32,0xe0cee7,0xc5a2d4)
+            ("Velvet Dusk",0x291f32,0xe0cee7,0xc5a2d4),
+            // Measured: a dark theme with a violet accent.
+            ("Whitby Bay",0x232831,0xd8dce6,0x7e5fb4)
         ]
         let light: [(String, UInt32, UInt32)] = [
             ("Alpine Milk",0xf2f6f4,0x648276), ("Buttercream Diner",0xfaf4e6,0x9d8050),
@@ -88,19 +98,44 @@ nonisolated struct TerminalTheme: Codable, Identifiable, Equatable, Sendable {
             ("Newsprint Fog",0xeeefef,0x67788b), ("Orchard Breeze",0xf1f5e9,0x75844b),
             ("Peach Veranda",0xfcf0e9,0xae7b62), ("Porcelain Morning",0xf9f9f4,0x777f9b),
             ("Silver Point Light",0xf0f0f5,0x7c79a8), ("Sunlit Parchment",0xf8f2df,0xa38343),
-            ("Terracotta Noon",0xf7eae1,0xad725b), ("Whitby Bay",0xeff4f6,0x60849a)
+            ("Terracotta Noon",0xf7eae1,0xad725b)
         ]
-        return [merinoDark, merinoLight] + dark.map { TerminalTheme(name:$0.0,background:$0.1,foreground:$0.2,accent:$0.3,ansi:darkANSI,isLight:false) } + light.map { TerminalTheme(name:$0.0,background:$0.1,foreground:0x454650,accent:$0.2,ansi:lightANSI,isLight:true) }
+        // Each appearance lists Merino first, then the rest alphabetically.
+        return [merinoDark] + dark.map { TerminalTheme(name:$0.0,background:$0.1,foreground:$0.2,accent:$0.3,ansi:darkANSI,isLight:false) }
+            + [merinoLight] + light.map { TerminalTheme(name:$0.0,background:$0.1,foreground:0x454650,accent:$0.2,ansi:lightANSI,isLight:true) }
     }()
 }
 
 nonisolated enum InterfaceStyle: String, CaseIterable, Codable, Sendable { case modern = "Modern", system = "System", themed = "Themed", blended = "Blended" }
 nonisolated enum Density: String, CaseIterable, Codable, Sendable { case comfortable = "Comfortable", compact = "Compact" }
 
+extension UInt32 {
+    /// This 0xRRGGBB colour moved `amount` of the way toward `other`, per
+    /// channel in its gamma-encoded space, as layer compositing mixes them.
+    nonisolated func mixed(with other: UInt32, by amount: Double) -> UInt32 {
+        let amount = Swift.min(1, Swift.max(0, amount))
+        func channel(_ shift: UInt32) -> UInt32 {
+            let from = Double(self >> shift & 255), to = Double(other >> shift & 255)
+            return UInt32((from + (to - from) * amount).rounded()) << shift
+        }
+        return channel(16) | channel(8) | channel(0)
+    }
+
+    nonisolated var rgbComponents: (red: Double, green: Double, blue: Double) {
+        (Double(self >> 16 & 255) / 255, Double(self >> 8 & 255) / 255, Double(self & 255) / 255)
+    }
+}
+
 extension Color {
-    nonisolated init(hex: UInt32) { self.init(.sRGB, red: Double((hex >> 16) & 255) / 255, green: Double((hex >> 8) & 255) / 255, blue: Double(hex & 255) / 255, opacity: 1) }
+    nonisolated init(hex: UInt32) {
+        let (red, green, blue) = hex.rgbComponents
+        self.init(.sRGB, red: red, green: green, blue: blue, opacity: 1)
+    }
 }
 
 extension NSColor {
-    nonisolated convenience init(hex: UInt32) { self.init(srgbRed: CGFloat((hex >> 16) & 255) / 255, green: CGFloat((hex >> 8) & 255) / 255, blue: CGFloat(hex & 255) / 255, alpha: 1) }
+    nonisolated convenience init(hex: UInt32) {
+        let (red, green, blue) = hex.rgbComponents
+        self.init(srgbRed: red, green: green, blue: blue, alpha: 1)
+    }
 }
