@@ -343,8 +343,11 @@ enum WorkspaceScene {
         let registry = WorkspaceRegistry.shared
         registry.nextWindowIntent = .newSession(host: model?.selectedHost ?? HostProfile.local.id,
                                                 parentBlock: model.flatMap { $0.focusedBlock.isEmpty ? nil : $0.focusedBlock })
-        if let frame = (model?.window ?? NSApp.keyWindow)?.frame {
-            registry.nextWindowFrame = frame.offsetBy(dx: 22, dy: -22)
+        if let window = model?.window ?? NSApp.keyWindow {
+            // Cascading a window that fills the screen would push it off the
+            // edge, so it gives up that overlap instead.
+            let frame = window.frame.offsetBy(dx: 22, dy: -22)
+            registry.nextWindowFrame = window.screen.map { frame.intersection($0.visibleFrame) } ?? frame
         }
         openWindow(id: id)
     }

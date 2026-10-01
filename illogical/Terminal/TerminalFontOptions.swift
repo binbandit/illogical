@@ -148,7 +148,7 @@ extension TerminalFontOptions {
     /// app bundles all four faces (see `TerminalBundledFonts`).
     static let defaultFontName = "JetBrainsMono Nerd Font"
     static let defaultFontSize: CGFloat = 13
-    static let defaults: TerminalFontOptions = {
+    nonisolated static let defaults: TerminalFontOptions = {
         var options = TerminalFontOptions()
         // Line height: the font's own, computed like Ghostty.
         options.cellHeight = .none

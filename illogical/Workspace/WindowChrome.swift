@@ -86,7 +86,7 @@ struct WindowConfigurator: NSViewRepresentable {
             window.collectionBehavior.insert(.fullScreenPrimary)
             if let frame = WorkspaceRegistry.shared.nextWindowFrame {
                 WorkspaceRegistry.shared.nextWindowFrame = nil
-                window.setFrame(window.constrainFrameRect(frame, to: window.screen), display: true)
+                window.setFrame(frame, display: true)
             }
             model.onRequestActivation = { [weak window] in
                 window?.makeKeyAndOrderFront(nil)
@@ -124,8 +124,8 @@ struct WindowConfigurator: NSViewRepresentable {
             if let close = window.standardWindowButton(.closeButton) {
                 for view in [close, close.superview?.superview].compactMap(\.self) {
                     view.postsFrameChangedNotifications = true
-                    observers.append(center.addObserver(forName: NSView.frameDidChangeNotification, object: view, queue: .main) { _ in
-                        DispatchQueue.main.async { [weak self] in self?.placeTrafficLights() }
+                    observers.append(center.addObserver(forName: NSView.frameDidChangeNotification, object: view, queue: .main) { [weak self] _ in
+                        DispatchQueue.main.async { self?.placeTrafficLights() }
                     })
                 }
             }
