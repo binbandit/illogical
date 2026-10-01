@@ -336,14 +336,15 @@ enum WorkspaceScene {
     static let id = "workspace"
 
     /// Command-N: a new window with a new session on the key window's host,
-    /// starting in the focused pane's directory and cascading from it.
+    /// starting in the focused pane's directory, sized like the key window
+    /// and cascading from it.
     @MainActor
     static func openNewWindow(from model: WorkspaceModel?, using openWindow: OpenWindowAction) {
         let registry = WorkspaceRegistry.shared
         registry.nextWindowIntent = .newSession(host: model?.selectedHost ?? HostProfile.local.id,
                                                 parentBlock: model.flatMap { $0.focusedBlock.isEmpty ? nil : $0.focusedBlock })
         if let frame = (model?.window ?? NSApp.keyWindow)?.frame {
-            registry.nextWindowTopLeft = NSPoint(x: frame.minX + 22, y: frame.maxY - 22)
+            registry.nextWindowFrame = frame.offsetBy(dx: 22, dy: -22)
         }
         openWindow(id: id)
     }

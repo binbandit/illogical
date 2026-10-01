@@ -84,9 +84,9 @@ struct WindowConfigurator: NSViewRepresentable {
             window.isMovableByWindowBackground = false
             window.tabbingMode = .disallowed
             window.collectionBehavior.insert(.fullScreenPrimary)
-            if let topLeft = WorkspaceRegistry.shared.nextWindowTopLeft {
-                WorkspaceRegistry.shared.nextWindowTopLeft = nil
-                window.setFrameTopLeftPoint(topLeft)
+            if let frame = WorkspaceRegistry.shared.nextWindowFrame {
+                WorkspaceRegistry.shared.nextWindowFrame = nil
+                window.setFrame(window.constrainFrameRect(frame, to: window.screen), display: true)
             }
             model.onRequestActivation = { [weak window] in
                 window?.makeKeyAndOrderFront(nil)
@@ -110,13 +110,25 @@ struct WindowConfigurator: NSViewRepresentable {
                 },
                 // The window server only accepts a blur once the window is on screen.
                 center.addObserver(forName: NSWindow.didBecomeKeyNotification, object: window, queue: .main) { [weak self] _ in
-                    MainActor.assumeIsolated { self?.applyBlur();self?.placeTrafficLights() }
+                    MainActor.assumeIsolated { self?.applyBlur() }
                 },
-                // AppKit lays the titlebar out again whenever the window resizes.
+                // AppKit puts the traffic lights back at their defaults while
+                // resizing; this arrives after it has, in the same frame.
                 center.addObserver(forName: NSWindow.didResizeNotification, object: window, queue: .main) { [weak self] _ in
                     MainActor.assumeIsolated { self?.placeTrafficLights() }
                 },
             ]
+            // Anything else that resets them (the edited dot, an appearance
+            // change) is caught here. AppKit ignores a move made while it is
+            // still positioning the buttons, so the fix waits until it is done.
+            if let close = window.standardWindowButton(.closeButton) {
+                for view in [close, close.superview?.superview].compactMap(\.self) {
+                    view.postsFrameChangedNotifications = true
+                    observers.append(center.addObserver(forName: NSView.frameDidChangeNotification, object: view, queue: .main) { _ in
+                        DispatchQueue.main.async { [weak self] in self?.placeTrafficLights() }
+                    })
+                }
+            }
             DispatchQueue.main.async { [weak self] in self?.placeTrafficLights() }
             let current = (title, colors)
             title = ""
@@ -126,7 +138,11 @@ struct WindowConfigurator: NSViewRepresentable {
 
         func apply(title: String, colors: ChromeColors) {
             guard let window else { self.title = title;self.colors = colors;return }
-            if window.title != title { window.title = title }
+            if window.title != title {
+                window.title = title
+                // A new title makes AppKit reset the traffic lights.
+                placeTrafficLights()
+            }
             guard self.colors != colors else { return }
             self.colors = colors
             let theme = colors.theme
@@ -168,8 +184,9 @@ struct WindowConfigurator: NSViewRepresentable {
 }
 
 /// Puts the close, minimise and zoom buttons where the design has them:
-/// centred vertically in the custom titlebar (by growing their container,
-/// as Electron's trafficLightPosition does) at fixed horizontal centres.
+/// centred vertically in the custom titlebar at fixed horizontal centres.
+/// Their container only grows when it is too short to hold them there,
+/// because AppKit shrinks it back on appearance changes.
 enum TrafficLights {
     private static let buttons: [NSWindow.ButtonType] = [.closeButton, .miniaturizeButton, .zoomButton]
 
@@ -177,11 +194,12 @@ enum TrafficLights {
     static func place(in window: NSWindow, titlebarHeight: CGFloat) {
         guard !window.styleMask.contains(.fullScreen), let close = window.standardWindowButton(.closeButton),
               let container = close.superview?.superview, let frameView = container.superview else { return }
-        var frame = container.frame
         let top = frameView.bounds.height
-        if frame.height != titlebarHeight || frame.maxY != top {
-            frame.size.height = titlebarHeight
-            frame.origin.y = top - titlebarHeight
+        let needed = (titlebarHeight + close.frame.height) / 2
+        if container.frame.maxY != top || container.frame.height < needed {
+            var frame = container.frame
+            frame.size.height = max(frame.height, needed)
+            frame.origin.y = top - frame.height
             container.frame = frame
         }
         for (index, type) in buttons.enumerated() {

@@ -42,8 +42,8 @@ final class WorkspaceRegistry {
     private(set) var history: [SessionKey]
     /// Consumed by the next window that starts, set just before opening it.
     var nextWindowIntent: WindowIntent?
-    /// Where the next window should appear, cascading from the key window.
-    var nextWindowTopLeft: NSPoint?
+    /// Where the next window should appear: the key window's size, cascaded.
+    var nextWindowFrame: NSRect?
 
     private static let historyKey = "sessionHistory"
     private static let historyLimit = 64
