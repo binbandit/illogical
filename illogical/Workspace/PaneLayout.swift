@@ -176,10 +176,17 @@ struct TerminalPane: View {
             onCellSize: { cellSize = $0 },
             copyOnSelection: preferences.copyOnSelection,
             onCopy: { text in model.send(WireRequest(method: .blockEvent, block: block, label: "selection_copied", data: Data(text.utf8)), host: host) },
-            onLink: { url in model.send(WireRequest(method: .blockEvent, block: block, label: "url_clicked", data: Data(url.absoluteString.utf8)), host: host) }
+            onLink: { url in model.send(WireRequest(method: .blockEvent, block: block, label: "url_clicked", data: Data(url.absoluteString.utf8)), host: host) },
+            menuItems: preview ? [] : Self.menuCommands.map { $0.map { TerminalMenuItem($0, model: model) } }
         )
         .id(block + (preview ? ".preview" : ".terminal"))
     }
+
+    /// A right-click focuses the pane, so these act on it. The palette sits
+    /// last, with its shortcut, as the way to everything else.
+    private static let menuCommands: [[WorkspaceCommand]] = [
+        [.splitRight, .splitDown], [.clearScreen], [.renameTab, .renameSession], [.commandPalette],
+    ]
 
     /// Dropping another pane's title row here moves that pane beside this one,
     /// on the side nearest the drop point's axis.
@@ -247,5 +254,16 @@ private struct PaneTitleRow: View {
         .buttonStyle(.plain)
         .help(label)
         .accessibilityLabel(label)
+    }
+}
+
+private extension TerminalMenuItem {
+    @MainActor
+    init(_ command: WorkspaceCommand, model: WorkspaceModel) {
+        let shortcut = command.shortcut
+        self.init(title: command.title, keyEquivalent: shortcut.map { String($0.key.character) } ?? "",
+                  modifiers: shortcut.map { NSEvent.ModifierFlags($0.modifiers) } ?? []) {
+            command.perform(CommandContext(model: model))
+        }
     }
 }

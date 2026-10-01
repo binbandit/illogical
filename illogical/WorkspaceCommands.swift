@@ -409,6 +409,8 @@ struct WorkspaceCommands: Commands {
             item(.clearScreen)
         }
         CommandGroup(before: .toolbar) {
+            item(.commandPalette)
+            Divider()
             Toggle(WorkspaceCommand.toggleVerticalTabs.title, isOn: Binding(get: { Preferences.shared.verticalTabs },
                                                                             set: { Preferences.shared.verticalTabs = $0 }))
                 .keyboardShortcut(WorkspaceCommand.toggleVerticalTabs.shortcut)
@@ -424,7 +426,7 @@ struct WorkspaceCommands: Commands {
             Divider()
         }
         CommandMenu("Session") {
-            items(.switchSession, .commandPalette)
+            item(.switchSession)
             Divider()
             item(.renameSession)
             Divider()
@@ -506,7 +508,7 @@ enum KeyAliasMonitor {
     }
 }
 
-private extension NSEvent.ModifierFlags {
+extension NSEvent.ModifierFlags {
     init(_ modifiers: EventModifiers) {
         self = []
         if modifiers.contains(.command) { insert(.command) }
@@ -516,8 +518,8 @@ private extension NSEvent.ModifierFlags {
     }
 }
 
-private extension CommandContext {
-    /// Alias chords only act on a window's model.
+extension CommandContext {
+    /// Alias chords and context menus only act on a window's model.
     init(model: WorkspaceModel) {
         self.model = model
         openNewWindow = {}

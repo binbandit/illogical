@@ -119,6 +119,10 @@ final class WorkspaceModel {
     @ObservationIgnored private var lastSearchQuery = ""
     @ObservationIgnored private var directoryContext: DirectoryContext?
     @ObservationIgnored private var directoryRequest: String?
+    /// Set when the window switches session because its own ended: until
+    /// then Command-W and Close Tab do nothing, so a burst of them cannot
+    /// carry on into the next session.
+    @ObservationIgnored private var closeGuardUntil: Date?
 
     private struct DirectoryContext: Equatable {
         let session: SessionKey
@@ -425,9 +429,14 @@ final class WorkspaceModel {
                 // A restarted service, or nothing chosen yet.
                 if selectedSession.isEmpty || reconnected { clearSelection();showMostRecentOrNewSession() }
             } else {
-                // The session ended: its windows close, like the last surface in Ghostty.
+                // The session ended: show the most recent one no other window
+                // shows, as tmux does. With none free, the window closes.
                 clearSelection()
-                requestClose()
+                if showMostRecentUnattachedSession() {
+                    closeGuardUntil = Date(timeIntervalSinceNow: Self.closeGuardInterval)
+                } else {
+                    requestClose()
+                }
             }
             return
         }
@@ -787,7 +796,7 @@ final class WorkspaceModel {
     /// Command-W. Dismisses an open overlay first; with nothing to close the
     /// window closes.
     func closeFocusedPane() {
-        if dismissOverlays() { return }
+        if dismissOverlays() || closeIsGuarded() { return }
         guard let deck = activeDeck, deck.root.contains(focusedBlock) else { closeWindow();return }
         closePane(focusedBlock)
     }
@@ -811,12 +820,23 @@ final class WorkspaceModel {
     /// Option-Command-W, the tab close button and context menu.
     func closeTab(_ deck: String? = nil) {
         if deck == nil, dismissOverlays() { return }
+        if closeIsGuarded() { return }
         let host = selectedHost
         let id = deck ?? selectedDeck
         guard let tab = activeSession?.windows.first(where: { $0.id == id }) else { return }
         confirmEnding(tab.root.blocks, host: host, title: "Close Tab?", always: false) { [weak self] in
             self?.perform(WireRequest(method: .windowKill, window: id), host: host)
         }
+    }
+
+    private static let closeGuardInterval: TimeInterval = 0.75
+
+    /// Whether a close arrived too soon after an automatic session switch.
+    /// Each one ignored extends the guard, so it lasts until the keys pause.
+    private func closeIsGuarded() -> Bool {
+        guard let closeGuardUntil, Date() < closeGuardUntil else { return false }
+        self.closeGuardUntil = Date(timeIntervalSinceNow: Self.closeGuardInterval)
+        return true
     }
 
     /// Ends every terminal of a session. Always confirms, since it removes a
@@ -966,11 +986,10 @@ final class WorkspaceModel {
         requestTerminalFocus()
     }
 
-    /// Sessions for the picker, most recently used first.
+    /// Sessions for the picker, by host, in the service's order. The order
+    /// never follows use, so each session keeps its place and its ⌘ number.
     var pickerSessions: [(key: SessionKey, session: Session, host: HostProfile)] {
-        let all = hosts.flatMap { host in sessions(on: host.id).map { (SessionKey(host: host.id, session: $0.id), $0, host) } }
-        let order = WorkspaceRegistry.shared.mostRecentFirst(all.map(\.0))
-        return order.compactMap { key in all.first { $0.0 == key } }
+        hosts.flatMap { host in sessions(on: host.id).map { (SessionKey(host: host.id, session: $0.id), $0, host) } }
     }
 
     /// Reads the user's Ghostty theme settings and offers them for preview.

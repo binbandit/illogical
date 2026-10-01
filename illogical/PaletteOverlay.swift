@@ -98,6 +98,10 @@ struct PaletteOverlay: View {
             let index = items.firstIndex { $0.id == item.id } ?? -1
             PaletteRow(item: item, highlighted: index == selected, colors: colors, metrics: metrics)
                 .onTapGesture { selected = index;activate(items) }
+                .contextMenu {
+                    if let rename = item.rename { Button("Rename Session…", action: rename) }
+                    if let close = item.close { Button("Close Session…", action: close) }
+                }
                 .id(item.id)
         }
     }
@@ -178,15 +182,13 @@ struct PaletteOverlay: View {
         selected = initialSelection
     }
 
-    /// The session picker highlights the previous session, so Command-K then
-    /// Return flips between two projects. Scopes start on the current value.
+    /// The session picker and the scopes start on the current value.
     private var initialSelection: Int {
         let items = entries.compactMap(\.item)
         switch mode {
         case .sessions:
-            let recent = model.pickerSessions
-            guard recent.count > 1, recent[0].key == model.shownSession else { return 0 }
-            return items.firstIndex { $0.id == Self.sessionID(recent[1].key) } ?? 0
+            guard let shown = model.shownSession else { return 0 }
+            return items.firstIndex { $0.id == Self.sessionID(shown) } ?? 0
         case .themes, .interfaceStyle, .fontSize:
             return items.firstIndex { $0.isCurrent } ?? 0
         case .commands, .directory:
@@ -271,11 +273,12 @@ struct PaletteOverlay: View {
         var entries: [PaletteEntry] = []
         var number = 0
         for host in model.hosts {
-            let recent = model.pickerSessions.filter { $0.key.host == host.id }
-            let rows = filtered(recent.map { entry in
+            let sessions = model.pickerSessions.filter { $0.key.host == host.id }
+            let rows = filtered(sessions.map { entry in
                 PaletteItem(id: Self.sessionID(entry.key), title: entry.session.name,
                             leading: entry.key == model.shownSession ? .checkmark : .blank,
                             elsewhere: model.otherWindow(showing: entry.key) != nil,
+                            rename: { model.beginRenameSession(entry.key.session, host: entry.key.host) },
                             close: { model.closeSession(entry.key.session, host: entry.key.host) }) {
                     model.choose(session: entry.key.session, host: entry.key.host)
                 }
@@ -433,6 +436,8 @@ private struct PaletteItem: Identifiable {
     var isCurrent = false
     /// Shown in another window; choosing it brings that window forward.
     var elsewhere = false
+    /// A session row's context menu actions; Command-Delete also closes.
+    var rename: (() -> Void)?
     var close: (() -> Void)?
     /// Character offsets of the title that match the query.
     var matches: [Int] = []

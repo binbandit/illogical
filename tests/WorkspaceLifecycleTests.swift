@@ -1,8 +1,9 @@
 import AppKit
 
 // What a window shows as panes, tabs and sessions come and go: Ghostty's
-// focus rule after a close, the neighbouring tab, the window closing with
-// its session, restoration, one session per window, and close confirmation.
+// focus rule after a close, the neighbouring tab, moving on to another
+// session when one ends, restoration, one session per window, and close
+// confirmation.
 @main
 struct WorkspaceLifecycleTests {
     typealias F = Fixture
@@ -15,13 +16,13 @@ struct WorkspaceLifecycleTests {
 
         closingPaneFocusesPreviousPane()
         closingTabSelectsNeighbour()
-        endingSessionClosesItsWindow()
+        endingSessionShowsAnother()
         emptyServiceStartsSession()
         windowIntents()
         oneSessionPerWindow()
         closeConfirmation()
         serviceFeatures()
-        print("Workspace lifecycle: focus after close, neighbour tabs, session-end window close, restore/new-window intents, one session per window and close confirmation passed.")
+        print("Workspace lifecycle: focus after close, neighbour tabs, moving on when a session ends, restore/new-window intents, one session per window and close confirmation passed.")
     }
 
     static func connect(_ peer: ServicePeer, _ intent: WindowIntent = .reopen, onClose: (() -> Void)? = nil) -> WorkspaceModel {
@@ -87,29 +88,56 @@ struct WorkspaceLifecycleTests {
         model.close()
     }
 
-    /// Hammering Command-W must never start closing another project, so a
-    /// window closes with its session instead of switching.
-    static func endingSessionClosesItsWindow() {
-        let sessions = ["a", "b"].map { F.session($0, [F.tab("t-\($0)", F.leaf("p-\($0)"))]) }
-        let peer = ServicePeer(name: "lifecycle-session", state: F.state(1, sessions: sessions, blocks: ["p-a", "p-b"]))
+    /// Like tmux, a window whose session ends shows the most recent session
+    /// no other window shows, and closes only when there is none. A burst
+    /// of Command-W must not carry on into the session it moved to.
+    static func endingSessionShowsAnother() {
+        let sessions = ["a", "b", "c"].map { F.session($0, [F.tab("t-\($0)", F.leaf("p-\($0)"))]) }
+        let peer = ServicePeer(name: "lifecycle-session", state: F.state(1, sessions: sessions, blocks: ["p-a", "p-b", "p-c"]))
+        let idle = #""pid":10,"foregroundPID":10,"user":"u","command":["zsh"],"cwd":"/","home":"/""#
+        peer.respond { request in
+            guard request.method == "block.process" else { return nil }
+            return [#"{"type":"reply","id":"\#(request.id)","process":{\#(idle)}}"#]
+        }
         let model = connect(peer)
         var closed = 0
         model.onRequestClose = { closed += 1 }
+        model.choose(session: "c", host: "local")
+        model.choose(session: "b", host: "local")
         model.choose(session: "a", host: "local")
         // A session may be published empty before the service removes it.
-        peer.publish(F.state(2, sessions: [F.session("a", []), sessions[1]], blocks: ["p-b"]))
-        Check.eventually("A session without tabs closes its window") { closed == 1 }
-        Check.that(model.selectedSession.isEmpty, "The ended session is no longer shown")
+        peer.publish(F.state(2, sessions: [F.session("a", []), sessions[1], sessions[2]], blocks: ["p-b", "p-c"]))
+        Check.eventually("The window moves to the most recent remaining session, got \(model.selectedSession)") {
+            model.selectedSession == "b" && model.focusedBlock == "p-b"
+        }
+        Check.that(closed == 0, "A window with another session to show stays open")
+        model.closeFocusedPane()
+        model.closeTab()
+        Check.settle(0.3)
+        model.closeFocusedPane()
+        Check.that(peer.requests("block.kill").isEmpty && peer.requests("window.kill").isEmpty,
+                   "Closes that keep coming after the switch must not reach the next session")
+        Check.settle(1)
+        model.closeFocusedPane()
+        Check.eventually("Once the keys pause, Command-W closes panes again") { peer.requests("block.kill").compactMap(\.block) == ["p-b"] }
         model.close()
 
-        let other = connect(peer)
+        // A session shown in another window is not taken from it.
+        let first = connect(peer, .restore(WindowSelection(host: "local", session: "b", tab: "")))
+        let second = connect(peer, .restore(WindowSelection(host: "local", session: "c", tab: "")))
         closed = 0
-        other.onRequestClose = { closed += 1 }
-        Check.eventually("Reopening shows the remaining session") { other.selectedSession == "b" }
-        peer.publish(F.state(3, sessions: [], blocks: []))
-        Check.eventually("A removed session closes its window") { closed == 1 }
+        first.onRequestClose = { closed += 1 }
+        Check.eventually("Each window shows its own session") { first.selectedSession == "b" && second.selectedSession == "c" }
+        peer.publish(F.state(3, sessions: [sessions[2]], blocks: ["p-c"]))
+        Check.eventually("With every other session shown elsewhere, the window closes") { closed == 1 }
+        Check.that(second.selectedSession == "c", "The other window keeps its session")
+        first.close()
+
+        second.onRequestClose = { closed += 1 }
+        peer.publish(F.state(4, sessions: [], blocks: []))
+        Check.eventually("With no session left, the window closes") { closed == 2 }
         Check.that(peer.requests("session.new").isEmpty, "Ending the last session must not start another")
-        other.close()
+        second.close()
     }
 
     static func emptyServiceStartsSession() {
@@ -168,7 +196,7 @@ struct WorkspaceLifecycleTests {
         let first = connect(peer, .restore(WindowSelection(host: "local", session: "a", tab: "")))
         let second = connect(peer, .restore(WindowSelection(host: "local", session: "b", tab: "")))
         Check.eventually("Each window shows its own session") { first.selectedSession == "a" && second.selectedSession == "b" }
-        Check.that(second.pickerSessions.map(\.key.session) == ["b", "a"], "The picker lists sessions most recent first")
+        Check.that(second.pickerSessions.map(\.key.session) == ["a", "b"], "The picker lists sessions in the service's order")
         var activated = 0
         first.onRequestActivation = { activated += 1 }
         second.choose(session: "a", host: "local")
@@ -176,7 +204,8 @@ struct WorkspaceLifecycleTests {
         second.choose(deck: "t-a", session: "a", host: "local")
         Check.that(second.selectedSession == "b" && activated == 2, "Choosing its tab does too")
         Check.that(second.otherWindow(showing: SessionKey(host: "local", session: "a")) === first, "The picker marks it as open elsewhere")
-        Check.that(second.pickerSessions.map(\.key.session) == ["a", "b"], "Using a session in its window makes it most recent")
+        second.choose(session: "b", host: "local")
+        Check.that(second.pickerSessions.map(\.key.session) == ["a", "b"], "Using a session must not reorder the picker")
         first.close()
         second.close()
     }

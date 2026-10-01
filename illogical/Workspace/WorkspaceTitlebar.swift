@@ -62,6 +62,10 @@ private struct SessionButton: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .contextMenu {
+            Button("Rename Session…") { model.beginRenameSession() }
+            Button("Close Session…") { model.closeSession(model.selectedSession, host: model.selectedHost) }
+        }
         .help("Change Session (⌘K)")
         .accessibilityLabel("Change session")
     }

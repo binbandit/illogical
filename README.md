@@ -44,9 +44,11 @@ The service keeps sessions, tabs, recursive split layouts, shell processes, and 
 
 The client supports horizontal and vertical tabs, nested splits, pane zoom and resizing, session and command pickers, a host-side directory picker, a floating search in each pane, tab previews and a session overview, paired light/dark themes, and Ghostty theme import. Rendering includes Nerd Font fallback, colour emoji, exact block graphics, ligatures, selection, links, mouse reporting and static Kitty images.
 
-Each window shows one session, and a session appears in at most one window: choosing a session that another window shows brings that window forward. Quitting and closing windows only detach; every window comes back on the next launch. Closing a pane, tab or session ends its processes and asks first when a program other than the shell is running. When a session's last terminal closes, its windows close.
+Each window shows one session, and a session appears in at most one window: choosing a session that another window shows brings that window forward. Quitting and closing windows only detach; every window comes back on the next launch. Closing a pane, tab or session ends its processes and asks first when a program other than the shell is running. When a session's last terminal closes, its window moves on to the most recently used session that no other window shows, and closes only when there is none.
 
-Rename the current tab with Shift-Command-I and the current session with Option-Shift-Command-I, or use the pencil beside a session in the session picker (Command-K). In the picker, Command-Delete closes the highlighted session.
+The session picker (Command-K) opens on the current session and keeps sessions in a fixed order, so Command-1 to 9 always choose the same one; Command-Delete closes the highlighted session. Rename a session by right-clicking it in the picker or the session name in the titlebar, or with Option-Shift-Command-I; rename the current tab with Shift-Command-I or by right-clicking it.
+
+Every command is in the command palette (Shift-Command-P), which is also the first item in the View menu and the last in the terminal's right-click menu.
 
 The shortcuts follow Ghostty's defaults, with Superlogical's where it differs. Menus, the command palette and this table share one command list (`illogical/WorkspaceCommands.swift`).
 

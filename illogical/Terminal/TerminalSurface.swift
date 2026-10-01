@@ -123,6 +123,32 @@ final class TerminalMetalView: MTKView {
     }
 }
 
+/// A workspace action in a terminal's right-click menu. Its key equivalent
+/// is only shown, so the menu also teaches the shortcut.
+struct TerminalMenuItem {
+    let title: String
+    var keyEquivalent = ""
+    var modifiers: NSEvent.ModifierFlags = []
+    let action: @MainActor () -> Void
+}
+
+/// Runs a `TerminalMenuItem`'s action; the menu keeps it alive while open.
+@MainActor
+private final class ClosureMenuItem: NSMenuItem {
+    private let run: @MainActor () -> Void
+
+    init(_ item: TerminalMenuItem) {
+        run = item.action
+        super.init(title: item.title, action: #selector(runAction), keyEquivalent: item.keyEquivalent)
+        target = self
+        keyEquivalentModifierMask = item.modifiers
+    }
+
+    required init(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    @objc private func runAction() { run() }
+}
+
 struct TerminalSurface: NSViewRepresentable {
     let engine: TerminalEngine
     let fontSize: CGFloat
@@ -147,6 +173,9 @@ struct TerminalSurface: NSViewRepresentable {
     var hidePointerWhileTyping = true
     /// Ghostty's `clipboard-paste-protection`.
     var confirmUnsafePaste = true
+    /// Groups of workspace actions for the right-click menu, after Copy,
+    /// Paste and Select All.
+    var menuItems: [[TerminalMenuItem]] = []
 
     func makeNSView(context: Context) -> NativeTerminalView { NativeTerminalView(engine: engine) }
 
@@ -166,6 +195,7 @@ struct TerminalSurface: NSViewRepresentable {
         view.onLink = onLink
         view.hidePointerWhileTyping = hidePointerWhileTyping
         view.confirmUnsafePaste = confirmUnsafePaste
+        view.menuItems = menuItems
         renderer?.fontSize = fontSize
         renderer?.fontName = fontName
         renderer?.fontOptions = fontOptions
@@ -209,6 +239,7 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
     private var feedbackDismissal: Task<Void, Never>?
 
     var copyOnSelection = false
+    var menuItems: [[TerminalMenuItem]] = []
     var pasteboard = NSPasteboard.general
     var onCopy: (String) -> Void = { _ in }
     var onLink: (URL) -> Void = { _ in }
@@ -850,8 +881,16 @@ final class NativeTerminalView: NSView, @MainActor NSTextInputClient {
     override func menu(for event: NSEvent) -> NSMenu? {
         guard interactive, peekProgress == 0 else { return nil }
         let menu = NSMenu()
-        for (title, action) in [("Copy", #selector(copy(_:))), ("Paste", #selector(paste(_:))), ("Select All", #selector(selectAll(_:)))] {
-            menu.addItem(withTitle: title, action: action, keyEquivalent: "").target = self
+        // Services, AutoFill and Writing Tools have nothing to offer a terminal.
+        menu.allowsContextMenuPlugIns = false
+        if #available(macOS 15.2, *) { menu.automaticallyInsertsWritingToolsItems = false }
+        for (title, action, key) in [("Copy", #selector(copy(_:)), "c"), ("Paste", #selector(paste(_:)), "v"),
+                                     ("Select All", #selector(selectAll(_:)), "a")] {
+            menu.addItem(withTitle: title, action: action, keyEquivalent: key).target = self
+        }
+        for group in menuItems where !group.isEmpty {
+            menu.addItem(.separator())
+            group.forEach { menu.addItem(ClosureMenuItem($0)) }
         }
         return menu
     }

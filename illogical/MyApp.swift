@@ -5,7 +5,19 @@ import SwiftUI
 struct IllogicalApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
-    init() { LaunchMetrics.mark("appInit") }
+    init() {
+        LaunchMetrics.mark("appInit")
+        // Registered here because SwiftUI builds the menus before the app
+        // delegate hears that launching began.
+        UserDefaults.standard.register(defaults: [
+            // Quitting only detaches from the service, so always bring every
+            // window back on launch, as Ghostty does with window-save-state.
+            "NSQuitAlwaysKeepsWindows": true,
+            // View has Toggle Full Screen on Command-Return; AppKit must not
+            // add its own Enter Full Screen beside it.
+            "NSFullScreenMenuItemEverywhere": false,
+        ])
+    }
 
     var body: some Scene {
         WindowGroup("illogical", id: WorkspaceScene.id) {
@@ -27,9 +39,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Sessions and tabs are the app's own; hide the system tab bar and
         // its Window menu items.
         NSWindow.allowsAutomaticWindowTabbing = false
-        // Quitting only detaches from the service, so always bring every
-        // window back on launch, as Ghostty does with window-save-state.
-        UserDefaults.standard.register(defaults: ["NSQuitAlwaysKeepsWindows": true])
         KeyAliasMonitor.install()
         applyGhosttyKeyboardConfiguration()
     }
