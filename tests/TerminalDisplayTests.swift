@@ -55,6 +55,16 @@ struct TerminalDisplayTests {
                      abs(surface.metal.drawableSize.height - backing.height) < 0.0001,
                      "The Metal viewport must not stretch an integer drawable across fractional physical pixels")
         precondition(resizes.count == 1 && reportedCells.count == 1)
+        // Core Animation shows the drawable at the layer's contentsScale, and
+        // the layer keeps its contents top-left rather than stretching them.
+        // A scale left behind by the previous display shows the terminal at
+        // half or double size.
+        func showsDrawableAtViewSize() -> Bool {
+            guard let scale = surface.metal.layer?.contentsScale, scale > 0 else { return false }
+            return abs(surface.metal.drawableSize.width / scale - surface.metal.bounds.width) < 0.5 &&
+                abs(surface.metal.drawableSize.height / scale - surface.metal.bounds.height) < 0.5
+        }
+        precondition(showsDrawableAtViewSize(), "The Metal layer must show its drawable at the view's size")
         let retinaCell = renderer.cell
         precondition(resizes.last?.2 == UInt32(retinaCell.width * 2) && resizes.last?.3 == UInt32(retinaCell.height * 2))
 
@@ -69,14 +79,18 @@ struct TerminalDisplayTests {
                      "Moving to 1x must update PTY cell pixels even if the window size did not change")
         precondition(monitorCell != retinaCell && reportedCells.last == monitorCell,
                      "Cell observers must receive the display's newly rounded grid metrics")
+        precondition(showsDrawableAtViewSize(), "Moving to a 1x display must not shrink the terminal to half size")
 
         surface.needsLayout = false
         window.displayScale = 2
         NotificationCenter.default.post(name: NSWindow.didChangeBackingPropertiesNotification, object: window)
         precondition(surface.needsLayout)
+        // AppKit sends both the window notification and the view callback.
+        surface.metal.viewDidChangeBackingProperties()
         surface.layoutSubtreeIfNeeded()
         RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02))
         precondition(renderer.cell == retinaCell && resizes.count == 3 && reportedCells.last == retinaCell)
+        precondition(showsDrawableAtViewSize(), "Moving back to Retina must not blow the terminal up to double size")
         let resizeCount = resizes.count
         for _ in 0..<3 {
             NotificationCenter.default.post(name: NSWindow.didChangeScreenNotification, object: window)
@@ -115,6 +129,6 @@ struct TerminalDisplayTests {
         NotificationCenter.default.post(name: NSWindow.didChangeBackingPropertiesNotification, object: window)
         precondition(!surface.needsLayout, "Detached surfaces must remove backing notifications")
         window.contentView = nil
-        print("Native display lifecycle: physical pixel alignment, Retina/1x/Retina metrics, idle resize propagation, mouse/IME alignment, preview isolation and teardown passed.")
+        print("Native display lifecycle: physical pixel alignment, Retina/1x/Retina metrics and layer scale, idle resize propagation, mouse/IME alignment, preview isolation and teardown passed.")
     }
 }

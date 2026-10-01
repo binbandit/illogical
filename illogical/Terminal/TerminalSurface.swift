@@ -83,6 +83,7 @@ final class TerminalMetalView: MTKView {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        matchLayerScaleToWindow()
         onDisplayEnvironmentChange?()
         if window != nil {
             // The parent's attachment callback can precede this child's window
@@ -103,7 +104,22 @@ final class TerminalMetalView: MTKView {
 
     override func viewDidChangeBackingProperties() {
         super.viewDidChangeBackingProperties()
+        matchLayerScaleToWindow()
         onDisplayEnvironmentChange?()
+    }
+
+    /// AppKit leaves the Metal layer at the scale of the display the window
+    /// started on, while MTKView sizes the drawable for the new one. The layer
+    /// keeps its contents top-left instead of stretching them, so a stale
+    /// scale shows the terminal at half size on a 1x display, or double size
+    /// back on Retina.
+    private func matchLayerScaleToWindow() {
+        guard let scale = window?.backingScaleFactor, let layer, layer.contentsScale != scale else { return }
+        CATransaction.begin()
+        // Without this Core Animation animates the contents between scales.
+        CATransaction.setDisableActions(true)
+        layer.contentsScale = scale
+        CATransaction.commit()
     }
 }
 
