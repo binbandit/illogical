@@ -94,6 +94,30 @@ pinned `libghostty-vt` for Apple Silicon macOS and for x86_64 and aarch64 Linux;
 the Linux targets pin glibc 2.34 so the released binaries run on Ubuntu 22.04,
 Debian 12, and RHEL 9.
 
+### Installer artwork
+
+The DMG automatically opens a Finder window with 760 x 500 point artwork and
+room for the title bar. The app and Applications shortcut sit directly on a
+pastel background using the app icon's palette and oversized flowing mark,
+with a drag arrow and installation guidance. The mounted volume uses the app's
+icon too.
+
+`scripts/render-dmg-background.swift` is the editable artwork source. It renders
+1x and 2x PNGs; `dmgbuild` combines these into a Retina TIFF inside the image.
+`scripts/dmg-settings.py` controls the matching Finder window and icon positions.
+To preview only the artwork, run `swift scripts/render-dmg-background.swift`;
+the images are written to `.build/dmg-artwork`.
+
+Packaging installs the pinned `scripts/dmg-requirements.txt` dependencies into
+`.build/dmg-venv` using the Xcode command-line tools' Python by default
+(`ILLOGICAL_PYTHON` can select another Python when creating that environment).
+The first run needs access to PyPI. Finder metadata is written directly, so
+release runners need no desktop session or Finder automation permission.
+The settings' creation hook records the root folder as the HFS+ volume's opening
+folder, using the filesystem API instead of the unsupported `bless --openfolder`
+command on Apple Silicon.
+The ZIP stays app-only, and signing and notarization run as before.
+
 ## Known limits
 
 The app ships for Apple Silicon only, which is the supported platform; the

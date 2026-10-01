@@ -11,10 +11,20 @@ OUT=${ILLOGICAL_RELEASE_DIR:-$ROOT/.build/release}
 NAME=illogical-$VERSION-macos-arm64
 STAGING=$OUT/$NAME
 APP=$STAGING/illogical.app
+DMG_TOOLS=$ROOT/.build/dmg-venv
+ARTWORK=$OUT/dmg-artwork
 
 [ -x "$SOURCE/Contents/MacOS/illogical" ] && [ -x "$SOURCE/Contents/Resources/bin/illogical" ] || {
     echo 'Build the Release app first: CONFIGURATION=Release ./scripts/build.sh' >&2; exit 1;
 }
+
+# Write Finder metadata directly, so CI needs neither a GUI session nor
+# permission to automate Finder. Keep packaging dependencies local to the repo.
+if [ ! -x "$DMG_TOOLS/bin/python" ]; then
+    "${ILLOGICAL_PYTHON:-/usr/bin/python3}" -m venv "$DMG_TOOLS"
+fi
+"$DMG_TOOLS/bin/python" -m pip install --disable-pip-version-check -r scripts/dmg-requirements.txt
+swift scripts/render-dmg-background.swift "$ARTWORK"
 
 NOTARIZE=no
 if [ -n "${ILLOGICAL_SIGN_IDENTITY:-}" ] && [ -n "${APPLE_ID:-}" ] &&
@@ -57,8 +67,9 @@ if [ "$NOTARIZE" = yes ]; then
     archive
 fi
 
-ln -s /Applications "$STAGING/Applications"
-hdiutil create -volname "illogical $VERSION" -srcfolder "$STAGING" -fs HFS+ -format UDZO -ov "$STAGING.dmg"
+"$DMG_TOOLS/bin/dmgbuild" -s scripts/dmg-settings.py \
+    -D "app=$APP" -D "background=$ARTWORK/background.png" \
+    "illogical $VERSION" "$STAGING.dmg"
 if [ "$NOTARIZE" = yes ]; then notarize "$STAGING.dmg" "$STAGING.dmg"; fi
 
 rm -rf "$STAGING"

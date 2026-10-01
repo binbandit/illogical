@@ -30,6 +30,9 @@ on:
       - scripts/test-next-version.sh
       - scripts/package-linux.sh
       - scripts/package-macos.sh
+      - scripts/dmg-settings.py
+      - scripts/dmg-requirements.txt
+      - scripts/render-dmg-background.swift
 
 permissions:
   contents: read
